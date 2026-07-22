@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "configVersion": 1,
+  "splitPunctuation": ["。", "！", "？", "；"],
+  "splitPauseThresholdMs": 1200,
+  "includeEnumerationComma": false,
+  "includeNewline": false,
+  "note": "双端同源 ASR 拆分配置。Swift/Kotlin 各自解析本文件，禁止在代码中硬编码拆分标点集或阈值，避免两端漂移（对应 P0-4）。F2 才消费，M1 仅定义结构。"
+}

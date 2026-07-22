@@ -1,0 +1,26 @@
+# ===== Xcode / iOS =====
+ios/**/xcuserdata/
+ios/**/*.xcworkspace/xcuserdata/
+ios/**/*.xcodeproj/xcuserdata/
+ios/DerivedData/
+ios/**/build/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+**/.DS_Store
+
+# ===== Android =====
+android/.gradle/
+android/**/build/
+android/captures/
+android/.idea/
+android/local.properties
+android/**/*.iml
+android/app/release/
+*.apk
+*.aab
+
+# ===== Misc =====
+.codebuddy/
+*.log

@@ -1,0 +1,4 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- M1 使用系统默认 DayNight 主题，保证可编译 -->
+    <style name="Theme.DailyPlan" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
