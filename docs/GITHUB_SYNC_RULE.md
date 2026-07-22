@@ -18,3 +18,14 @@
 - 远程：origin = `https://github.com/Satus9527/DailyList.git`
 - 默认分支：`main`
 - 本规则文档自身也随首次推送入库，作为统一上下文的一部分。
+
+## 执行机制（落地方式）
+- **工作副本**：`/workspace`（各角色/子代理在此产出文档与代码）。
+- **仓库克隆**：本地克隆于沙箱内的 DailyList 仓库，`docs/` 存放规划/PRD/评审等文档，源码后续按模块置于仓库根。
+- **每个基本进程完成后**，由协调角色（或该角色本人在获得仓库与 token 上下文时）执行：
+  1. 将 `/workspace` 中本次变更的产出复制到仓库对应目录（`docs/` 或根）；
+  2. `git pull --rebase origin main` 先同步远端；
+  3. `git add -A && git commit -m "[角色] 阶段/里程碑 - 简述"`；
+  4. `git push origin main` 上传。
+- 推送失败（鉴权/冲突）立即上报，不静默跳过。
+- 目标：让 GitHub 始终反映最新项目上下文，任何角色的成果不积压。
