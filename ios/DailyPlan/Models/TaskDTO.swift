@@ -50,6 +50,25 @@ struct TaskDTO: Identifiable, Equatable {
     }
 }
 
+// MARK: - M4 S5 展示日（跨 0 点重归类，仅展示层，不改动 date 存储）
+
+extension TaskDTO {
+    /// 展示日：跨 0 点时取 remindAt 所属日，否则取 date（规格 §3.2）。
+    var displayDay: String {
+        if let ra = remindAt {
+            let raDay = DateFormatter.todayDateString(ra)
+            if raDay != date { return raDay }   // 跨 0 点：归触发日
+        }
+        return date                              // 普通：归创建日
+    }
+
+    /// 是否跨 0 点：remindAt 所属日 ≠ date。
+    var isCrossDay: Bool {
+        guard let ra = remindAt else { return false }
+        return DateFormatter.todayDateString(ra) != date
+    }
+}
+
 // MARK: - 日期工具（本地时区 yyyy-MM-dd）
 
 extension DateFormatter {

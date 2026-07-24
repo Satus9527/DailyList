@@ -31,4 +31,11 @@ interface TaskRepository {
 
     /** 扫描 remindAt ∈ [now, until] 且未完成的待办（规格 §5.3，支撑 F3） */
     suspend fun tasksWithPendingReminders(until: Date): List<Task>
+
+    /**
+     * 按「展示日」取当日全部待办（规格 §3.3 / S5，仅展示层重归类，不改动 date 存储）：
+     * 返回 date == day 的任务，以及 remindAt 所属本地日 == day 但 date != day 的跨 0 点任务。
+     * 排序沿用 M1（进行中在上、已完成置底、同组 sortOrder 升序）。
+     */
+    suspend fun tasksByDisplayDay(day: String): List<Task>
 }

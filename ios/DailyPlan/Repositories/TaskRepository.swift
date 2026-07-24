@@ -25,4 +25,9 @@ protocol TaskRepository {
     /// 扫描未完成且有 remindAt，且 remindAt ∈ [now, until] 的待办（支撑 F3 重启/跨日补偿，规格 §5.3）
     /// - Parameter until: 扫描上界（绝对时刻）。now 取调用时刻。
     func tasksWithPendingReminders(until date: Date) throws -> [TaskDTO]
+
+    /// 展示日取数（M4 S5，规格 §3.3）：返回「date == day」或「remindAt 落在 day 当天」的全部任务（含跨 0 点项）。
+    /// 不新增 Task 字段；调用方再按 `TaskDTO.displayDay` 二次过滤归并到「当日列表」。
+    /// - Parameter day: 本地时区 "yyyy-MM-dd" 展示日。
+    func tasksForDisplayDay(_ day: String) throws -> [TaskDTO]
 }

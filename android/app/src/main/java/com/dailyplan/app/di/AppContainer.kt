@@ -19,6 +19,9 @@ import com.dailyplan.app.data.reminder.ReminderNotificationHelper
 import com.dailyplan.app.data.reminder.ReminderScheduler
 import com.dailyplan.app.data.reminder.WorkManagerReminderScheduler
 import com.dailyplan.app.ui.viewmodel.TodayViewModel
+import com.dailyplan.app.domain.voice.TaskMergeSplitUseCase
+import com.dailyplan.app.domain.voice.TaskMergeSplitUseCaseImpl
+import com.dailyplan.app.util.SettingsPrefs
 import androidx.work.WorkManager
 
 class AppContainer(context: Context) {
@@ -48,8 +51,22 @@ class AppContainer(context: Context) {
     )
 
     /** 创建今日 ViewModel（每次读取当日库），注入提醒调度器与语音层（M2 / M3 接线点） */
+    /** M4 R-4：合并/拆分领域用例（复用 M1/M2，规格 §7 / AC-5） */
+    val taskMergeSplitUseCase: TaskMergeSplitUseCase =
+        TaskMergeSplitUseCaseImpl(taskRepository, reminderScheduler, asrSplitConfig)
+
+    /** M4 R-4：本地设置持久化（语音输入开关等） */
+    val settingsPrefs: SettingsPrefs = SettingsPrefs(appContext)
+
     fun todayViewModel(): TodayViewModel =
-        TodayViewModel(taskRepository, reminderScheduler, asrController, asrSplitConfig)
+        TodayViewModel(
+            repository = taskRepository,
+            reminderScheduler = reminderScheduler,
+            asrController = asrController,
+            asrSplitConfig = asrSplitConfig,
+            mergeSplitUseCase = taskMergeSplitUseCase,
+            settingsPrefs = settingsPrefs
+        )
 
     /** 首启种子：写入预设分类（规格 §3.2）；失败不崩溃（规格 §10.4） */
     fun seedPresetCategoriesIfNeeded() {

@@ -173,6 +173,56 @@ android/
   2. 离线包回退联网的 `EXTRA_PREFER_OFFLINE` 行为因设备/系统版本而异，需真机验证 P0-1 链路与「停止并保存」时序。
   3. `SpeechRecognizer` 为 Google 服务依赖，非所有 ROM 内置；`isAvailable=false` 时降级路径已就绪。
 
+## M4（提醒与首页增强）Android 完成项
+
+> 阶段：M4（在 M1 数据层 + M2 通知层 + M3 语音层之上实现首页增强）。依据 `设计规格_M4增强.md`（D3 / D4 / S5 / R-4）。
+> 复用 M1/M2/M3 全部能力，未新增 Task 字段；新增只读查询与方法均为数据层零返工。
+
+### D3 错过的提醒区（AC-10）
+- **检测做法**：`TodayViewModel.reload()` 将 `remindAt < now` 且 `isDone == false` 且展示日 `displayDay == 今日` 的任务归入 `missedTasks`（按 remindAt 升序）。
+  - `displayDay(task)`（`domain/model/Task.kt`）沿用规格 §3.2：跨 0 点任务归 `remindAt` 所属本地日，普通任务归 `date`；仅展示层重归类，绝不写回 `date`。
+  - 不引入触发日志表，按「应响未响」确定性推导（规格 §1.1）。
+- **首页展示**：`TodayScreen` 顶部（进度之下、列表之上）渲染 `MissedReminderSection`「错过的提醒 · N」；单条 `TaskItem` 带橙红「提醒未达」胶囊（`badgeText="提醒未达"`）。空态整段不渲染。
+- **点按行为**：勾选即标记完成（复用 `toggleDone` → `markDone` + 通知 `cancel`）；点击行进入行内编辑（与既有行为一致）。
+- **刷新时机**：随 `reload()`（启动/前台/增删改后）重算，与 M2 `rescheduleAllPending` 同链路。
+
+### D4 首页常驻提示（AC-20）
+- **检测**：`data/reminder/NotificationStatusHelper.getStatus` 复用 M2 已就绪回调——
+  - 通知权限：`NotificationManagerCompat.from(ctx).areNotificationsEnabled()`；
+  - DND 拦截（API≥23）：`NotificationManager.currentInterruptionFilter` 为 `NONE`，或 `ALARMS`/`PRIORITY` 且未获「绕过勿扰」授权。
+- **横幅**：仅当存在风险（通知关 / DND 拦截）时，`TodayScreen` 顶部常驻黄/橙横幅「提醒可能不送达，去开启通知 / 勿扰模式可能拦截提醒，去设置」，点击 `viewModel.openNotificationSettings` 深链：
+  - 通知关 → `Settings.ACTION_APP_NOTIFICATION_SETTINGS`（`EXTRA_APP_PACKAGE`）；
+  - DND → `Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS`。
+- **重算**：`TodayScreen` 首次组合与 `MainActivity.onResume`、设置页关闭后均调 `refreshNotificationStatus`。无风险不渲染（零打扰）。
+
+### S5 跨日提醒列表归类（R-U4 / AC-27②）
+- **取数（仅展示层，不改 date）**：`TaskRepository`/`LocalTaskRepository` 新增只读查询 `tasksByDisplayDay(day)`，DAO 用 `date(remind_at/1000,'unixepoch','localtime')` 取 `remindAt` 本地日，并 `OR date = :day` 并入跨 0 点项；含已完成（置底由 `ORDER BY is_done` 控制）。
+- **重归类**：`reload()` 基于该查询构建「错过的提醒 / 进行中 / 已完成」三区块，跨 0 点任务按展示日归入触发日进行中/已完成，原 `date` 存储不变。时区统一设备本地时区（R-U5）。
+- 新增 `displayDay(task)` 工具函数（规格 §3.2），供 UI/判定复用。
+
+### R-4 设置页（AC-22）
+- 新增 `ui/screen/SettingsScreen.kt`，由首页右上角齿轮（`Icons.Filled.Settings`）以 `ModalBottomSheet` 进入。
+- 内容：通知权限状态（绿/灰点）+ 去系统设置；麦克风权限状态 + 去应用详情设置（`ACTION_APPLICATION_DETAILS_SETTINGS`）；语音输入开关（持久化于 `util/SettingsPrefs`，关闭即禁用首页语音按钮）；P0-1 隐私说明文案；默认提醒策略只读展示（提前 10 分 + 到点 + 每 10 分重复最多 3 次）。
+- 关闭设置页后重算 D4 横幅。
+
+### R-4 合并/拆分 UI（AC-5）
+- 新增领域用例 `domain/voice/TaskMergeSplitUseCase.kt`（接口 + `TaskMergeSplitUseCaseImpl`），复用 M1 `TaskRepository` 与 M2 `ReminderScheduler`，不新增 Task 字段。
+  - `merge(tasks)`：保留最早 `date`、最前 `sortOrder`，title 以「、」连接，remindAt 取首个有提醒者，isDone 取「全完成才完成」；删除被并条目并调度主条提醒。
+  - `split(task, at)`：第 `at` 字符处断开；断点为 `splitPunctuation` 标点时标点归属前段并丢弃；前段带走原 id 与 remindAt，后段新 id、相邻 `sortOrder`，无提醒。空段忽略（R-X4）。标点集取自 `ASRSplitConfig`（P0-4 防漂移）。
+- **UI 入口**：`TaskItem` 长按（`combinedClickable` + `DropdownMenu`，并保留「更多」按钮兼容性）弹「合并到上一条 / 从此处拆分」。`TodayScreen` 按平铺顺序定位「上一条」（`mergeWithPrevious`），拆分弹 `SplitDialog`（光标定位拆分点）。调用后经 `repository.update/add/delete` 落库（`Flow` 自动刷新，重启保持）。
+- 合并/拆分各标注埋点 `todo_merge` / `todo_split`（仅标注不写上报）。
+
+### 接线与新增/修改文件
+- 新增：`domain/voice/TaskMergeSplitUseCase.kt`、`data/reminder/NotificationStatusHelper.kt`、`util/SettingsPrefs.kt`、`ui/screen/SettingsScreen.kt`。
+- 修改：`domain/model/Task.kt`（displayDay）、`data/repository/TaskRepository.kt` + `LocalTaskRepository.kt` + `dao/TaskDao.kt`（tasksByDisplayDay）、`ui/viewmodel/TodayViewModel.kt`（三区块 + D4 + 合并拆分 + 语音开关，reload 改用 tasksByDisplayDay）、`ui/screen/TodayScreen.kt`（D3/D4/分区/设置入口/拆分框）、`ui/screen/TaskItem.kt`（长按菜单 + 错过胶囊）、`di/AppContainer.kt`（注入新依赖）、`MainActivity.kt`（onResume 重算 D4）。
+- 埋点调用点（仅标注）：`missed_reminder_shown`、`notification_banner_shown`、`settings_open`、`todo_merge`/`todo_split`。
+
+### 刻意未做 / 需确认（M4）
+- **iOS 端实现**：本任务仅 Android。
+- **R-3 口径**：采用 M3「尾句单独成条」，由产品回写 PRD R-E2/AC-3（本 M4 仅作声明，不修改 PRD 原文）。
+- **真机验证**：DND 拦截判定、`currentInterruptionFilter` 行为、跨日触发与归类、合并/拆分手感需真机验证（同 M2/M3 验收跟进项）。
+- **需确认**：跨 0 点任务的 `tasksByDisplayDay` 依赖 SQLite `date()` 本地日函数；如厂商品牌 ROM 对 `date()` 本地时区处理有差异，建议真机抽样验证归类边界。
+
 ## 与规格的偏差 / 待确认点
 - **Room 多对多**：Android 用显式 `task_tag` 关联表（规格 §7.2）；iOS 用原生 many-to-many，两者语义等价。
 - **拖拽手势**：M1 排序通过「上移/下移」按钮驱动 `reorder`（持久化已验证），完整手指拖拽建议 F4 阶段增强。

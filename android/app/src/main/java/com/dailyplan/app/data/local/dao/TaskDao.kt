@@ -66,6 +66,26 @@ interface TaskDao {
         ORDER BY remind_at ASC
     """)
     suspend fun tasksWithPendingReminders(now: Date, until: Date): List<TaskEntity>
+
+    // S5 跨日归类（规格 §3.3 / 对齐 iOS Task.displayDay）：按展示日取数，不改动 date 存储。
+    // remind_at 经 Converters 存为毫秒 INTEGER；date(remind_at/1000,'unixepoch','localtime') 得到本地日 yyyy-MM-dd。
+    // 展示日规则（与 domain displayDay 一致）：
+    //   跨 0 点任务（remind_at 所属日 ≠ date）仅并入 remind_at 所属日（:day）；
+    //   普通任务（remind_at 为空，或 remind_at 所属日 = date）按 date 并入。
+    // 故归属某 :day 的条件为：
+    //   (date = :day 且「不属于跨 0 点任务」)  —— 普通任务归 date 当日；
+    //   OR (remind_at 不为空 且 remind_at 所属日 ≠ date 且 remind_at 所属日 = :day) —— 跨 0 点任务仅归触发日。
+    @Query("""
+        SELECT * FROM task
+        WHERE (date = :day
+               AND NOT (remind_at IS NOT NULL
+                        AND date(remind_at / 1000, 'unixepoch', 'localtime') <> date))
+           OR (remind_at IS NOT NULL
+               AND date(remind_at / 1000, 'unixepoch', 'localtime') <> date
+               AND date(remind_at / 1000, 'unixepoch', 'localtime') = :day)
+        ORDER BY is_done ASC, sort_order ASC
+    """)
+    suspend fun tasksByDisplayDay(day: String): List<TaskEntity>
 }
 
 /** 重排参数载体（id + 新 sortOrder） */

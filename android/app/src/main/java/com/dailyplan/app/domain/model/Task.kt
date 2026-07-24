@@ -62,3 +62,22 @@ fun todayDateString(date: Date = Date()): String {
     df.timeZone = java.util.TimeZone.getDefault()   // 设备本地时区（规格 §1.1）
     return df.format(date)
 }
+
+/** 取某 Date 在设备本地时区的 "yyyy-MM-dd"（规格 §3.2） */
+private fun localDayString(d: Date): String {
+    val df = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+    df.timeZone = java.util.TimeZone.getDefault()
+    return df.format(d)
+}
+
+/**
+ * 展示日（规格 §3.2 / S5）：
+ * - 若任务设置了 remindAt 且 remindAt 所属本地日 ≠ date（跨 0 点），则归触发日（remindAt 所属日）；
+ * - 否则归创建日 date。
+ * 注意：仅用于展示层重归类，绝不写回 date 存储。
+ */
+fun displayDay(task: Task): String {
+    val ra = task.remindAt ?: return task.date
+    val raDay = localDayString(ra)
+    return if (raDay != task.date) raDay else task.date
+}

@@ -44,6 +44,31 @@ struct LocalTaskRepository: TaskRepository {
         }
     }
 
+    // MARK: - M4 S5 展示日取数（只读，不新增字段）
+
+    func tasksForDisplayDay(_ day: String) throws -> [TaskDTO] {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        df.timeZone = TimeZone.current   // 设备本地时区（规格 §1.1）
+        guard let dayDate = df.date(from: day) else { return [] }
+        let start = Calendar.current.startOfDay(for: dayDate)
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start
+        return try context.performAndWait {
+            let req = Task.fetchRequest()
+            // date == day（普通任务）或 remindAt 落在 day 当天（含跨 0 点项：date != day 但 remindAt 日 == day）
+            req.predicate = NSPredicate(
+                format: "date == %@ OR (remindAt != nil AND remindAt >= %@ AND remindAt < %@)",
+                day, start as NSDate, end as NSDate
+            )
+            req.sortDescriptors = [
+                NSSortDescriptor(key: "isDone", ascending: true),
+                NSSortDescriptor(key: "sortOrder", ascending: true)
+            ]
+            let results = try context.fetch(req)
+            return results.map { ($0 as! Task).toDTO() }
+        }
+    }
+
     // MARK: - 写操作（单事务提交）
 
     func add(_ task: TaskDTO) throws {

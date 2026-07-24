@@ -12,6 +12,13 @@ struct TodayView: View {
     @State private var editingId: UUID?
     /// F3 提醒设置面板所针对的待办（nil 表示未打开）
     @State private var reminderTask: TaskDTO?
+    /// M4 R-4 设置页（AC-22）：齿轮入口弹出
+    @State private var showSettings = false
+    /// M4 R-4 拆分位置输入（alert）
+    @State private var splitTarget: TaskDTO?
+    @State private var splitIndexText: String = ""
+    /// 进入前台（含从系统设置返回）刷新权限状态（D4 横幅，规格 §2.2）
+    @Environment(\.scenePhase) private var scenePhase
 
     // —— F2 录音态视觉反馈（红点/计时/波形）——
     @State private var voiceElapsed = 0        // 录音计时（秒），仅听写中累加
@@ -87,21 +94,89 @@ struct TodayView: View {
                     .padding(.bottom, 4)
                 }
 
-                // 当日列表（可拖拽重排，AC-16）
-                List {
-                    ForEach(vm.tasks) { task in
-                        TaskRowView(
-                            task: task,
-                            isEditing: $editingId,
-                            onToggleDone: { vm.toggleDone($0) },
-                            onCommitEdit: { vm.editTitle($0, to: $1) },
-                            onDelete: { vm.delete($0) },
-                            onSetReminder: { reminderTask = $0 }
-                        )
+                // M4 D4：首页常驻横幅「提醒可能不送达」（仅通知未授权时显示，规格 §2）
+                if vm.showNotificationBanner {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bell.slash.fill")
+                            .foregroundColor(.orange)
+                        Text("提醒可能不送达，去开启通知")
+                            .font(.subheadline)
+                            .foregroundColor(.primary)
+                        Spacer()
+                        Button(action: { vm.bannerDismissedThisSession = true }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.borderless)
                     }
-                    .onMove { from, to in
-                        // 拖拽仅影响当日待办（规格 §5.1 reorder）
-                        vm.reorder(from: from, to: to)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal)
+                    .onTapGesture { vm.openAppSettings() }   // 深链系统设置（规格 §2.3）
+                }
+
+                // 当日列表（M4 S5：错过的提醒 / 进行中 / 已完成 三个区块；进行中可拖拽，AC-16）
+                List {
+                    // —— M4 D3 错过的提醒区（AC-10）——
+                    if !vm.missedTasks.isEmpty {
+                        Section {
+                            ForEach(vm.missedTasks) { task in
+                                TaskRowView(
+                                    task: task,
+                                    isEditing: $editingId,
+                                    onToggleDone: { vm.toggleDone($0) },
+                                    onCommitEdit: { vm.editTitle($0, to: $1) },
+                                    onDelete: { vm.delete($0) },
+                                    onSetReminder: { reminderTask = $0 },
+                                    onRowTap: { reminderTask = $0 },   // 点按跳转：打开提醒设置
+                                    missedBadge: true
+                                )
+                            }
+                        } header: {
+                            HStack {
+                                Text("错过的提醒")
+                                Spacer()
+                                Text("\(vm.missedTasks.count)")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    // —— 进行中（含跨 0 点归触发日的任务）——
+                    Section {
+                        ForEach(vm.inProgressTasks) { task in
+                            TaskRowView(
+                                task: task,
+                                isEditing: $editingId,
+                                onToggleDone: { vm.toggleDone($0) },
+                                onCommitEdit: { vm.editTitle($0, to: $1) },
+                                onDelete: { vm.delete($0) },
+                                onSetReminder: { reminderTask = $0 },
+                                onMergeUp: { vm.mergeWithPrevious($0) },   // M4 R-4 合并到上一条
+                                onSplit: { requestSplit($0) }              // M4 R-4 从此处拆分
+                            )
+                        }
+                        .onMove { from, to in
+                            // 拖拽仅影响「进行中」展示区块（规格 §5.1 reorder / M4 S5）
+                            vm.reorderInProgress(from: from, to: to)
+                        }
+                    } header: { Text("进行中") }
+
+                    // —— 已完成（置底）——
+                    if !vm.doneTasks.isEmpty {
+                        Section {
+                            ForEach(vm.doneTasks) { task in
+                                TaskRowView(
+                                    task: task,
+                                    isEditing: $editingId,
+                                    onToggleDone: { vm.toggleDone($0) },
+                                    onCommitEdit: { vm.editTitle($0, to: $1) },
+                                    onDelete: { vm.delete($0) },
+                                    onSetReminder: { reminderTask = $0 }
+                                )
+                            }
+                        } header: { Text("已完成") }
                     }
                 }
                 .listStyle(.plain)
@@ -118,6 +193,14 @@ struct TodayView: View {
                 .padding()
             }
             .navigationTitle("今日计划")
+            // 齿轮入口：M4 R-4 设置页（AC-22）
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                }
+            }
             // 进入/退出录音态：计时归零（红点/波形由子视图自行 onAppear 启停）
             .onChange(of: vm.isVoiceActive) { _, active in
                 voiceElapsed = 0
@@ -125,6 +208,11 @@ struct TodayView: View {
             // 录音中每秒累加计时
             .onReceive(voiceTimer) { _ in
                 if vm.isVoiceActive { voiceElapsed += 1 }
+            }
+            // M4 D4：进入前台/回到本页刷新权限状态（含从系统设置返回）
+            .onAppear { vm.refreshPermissions() }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active { vm.refreshPermissions() }
             }
             // F2 降级/提示 Toast：不阻塞文字记录流（R-X1）
             .overlay(alignment: .bottom) {
@@ -139,6 +227,10 @@ struct TodayView: View {
                         .onTapGesture { vm.voiceToast = nil }
                 }
             }
+            // M4 R-4 设置页（AC-22）：挂在内部 VStack 上，避免与 NavigationView 的 reminderTask .sheet 同视图冲突
+            .sheet(isPresented: $showSettings) {
+                SettingsView(vm: vm)
+            }
         }
         // F3 提醒设置面板（M2-D，Task #36）：保存经 VM 持久化并排程
         .sheet(item: $reminderTask) { task in
@@ -150,6 +242,39 @@ struct TodayView: View {
                 }
             )
         }
+        // M4 R-4 设置页（AC-22）由内部 VStack 的 .sheet 承载（见下方 VStack 链），此处不再重复
+        // M4 R-4 拆分位置输入（alert）：默认按首个句末标点断开，可手动填字符序号
+        .alert("拆分位置", isPresented: Binding(
+            get: { splitTarget != nil },
+            set: { if !$0 { splitTarget = nil } }
+        )) {
+            TextField("从第几个字断开", text: $splitIndexText)
+                .keyboardType(.numberPad)
+            Button("拆分") {
+                if let t = splitTarget, let i = Int(splitIndexText) {
+                    vm.split(t, at: i)   // 复用 M3 拆分用例，落库后即时刷新
+                }
+                splitTarget = nil
+            }
+            Button("取消", role: .cancel) { splitTarget = nil }
+        } message: {
+            Text("默认按首个句末标点断开；可手动填入字符序号。")
+        }
+    }
+
+    // M4 R-4：计算拆分默认断点（首个拆分标点之后），弹出输入 alert（规格 §4.2）
+    private func requestSplit(_ task: TaskDTO) {
+        let puncts = ASRSplitConfig.loadFromBundle()?.splitPunctuation ?? []
+        var idx = max(1, task.title.count / 2)
+        for p in puncts {
+            if let r = task.title.range(of: p) {
+                let pos = task.title.distance(from: task.title.startIndex, to: r.lowerBound)
+                idx = pos + 1   // 标点归属前段
+                break
+            }
+        }
+        splitTarget = task
+        splitIndexText = String(idx)
     }
 }
 

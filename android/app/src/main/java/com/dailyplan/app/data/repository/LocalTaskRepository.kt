@@ -52,4 +52,9 @@ class LocalTaskRepository(private val db: AppDatabase) : TaskRepository {
         val now = Date()
         return dao.tasksWithPendingReminders(now, until).map { it.toDomain() }
     }
+
+    override suspend fun tasksByDisplayDay(day: String): List<Task> {
+        // 按展示日取数（跨 0 点任务并入），含已完成（置底由 ORDER BY is_done 控制）
+        return dao.tasksByDisplayDay(day).map { it.toDomain() }
+    }
 }

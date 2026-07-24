@@ -172,6 +172,45 @@ ios/DailyPlan/
 - **长按合并/拆分 UI（AC-5）**：接口与基础版已实现，但列表长按手势入口未接（待确认项 5，建议 M3.1 补 UI）。
 - **真机语音质量 / 端到端拆分**：需真机验证（同 M1/M2 验收跟进项）。
 
+## M4（提醒与首页增强）iOS 完成项与未做项
+
+> 阶段：Stage 4 / Milestone M4（Task #68 M4-B，iOS）。依据 `设计规格_M4增强.md`（D3/D4/S5/R-4）。
+> 范围：**仅补 UI 与展示层逻辑**，数据/调度/领域层全部复用 M1/M2/M3，未新增任何 Task 字段。
+
+### 已实现（M4 · iOS）
+
+- **D3 错过的提醒区（AC-10）**：
+  - `TodayTaskViewModel` 新增 `missedTasks` 派生分区：`!isDone && remindAt != nil && remindAt < now && displayDay == 今日`（§1.1）。判定复用 `remindAt`/`isDone`/`date`，不引入触发日志表。
+  - `TodayView` 顶部进度条之下、「进行中」列表之上新增「错过的提醒」Section（带计数），单条展示「提醒未达」橙红胶囊（`accessibilityLabel` 已加）。
+  - 点按行 → 跳转（打开 `ReminderSettingView`）；勾选 → `toggleDone` 标记完成并联动 `scheduler.cancel`（复用 M2），即时移出该区。空态整段不渲染。
+  - 检测随 `reload()`（启动/进入前台/每次写后）重算。
+
+- **D4 首页常驻提示（AC-20）**：
+  - `TodayTaskViewModel` 持有 `notificationAuthStatus`（经 `UNUserNotificationCenter.getNotificationSettings` 异步回填）与 `micAuthStatus`（经 `AVAudioSession.recordPermission`）。
+  - 横幅 `showNotificationBanner` 仅在通知未授权（`!= .authorized`，含 `provisional/denied/notDetermined` 视为「可能不达」）时显示；右侧「×」仅本次会话收起（不持久化，避免掩盖风险）。
+  - 横幅点按 → `openAppSettings()` 深链 `UIApplication.openSettingsURLString`；`onAppear` 与 `scenePhase == .active`（含从设置返回）刷新状态。
+
+- **S5 跨日归类（R-U4 / AC-27②）**：
+  - `TaskDTO` 新增 `displayDay`（跨 0 点取 `remindAt` 所属日，否则取 `date`）、`isCrossDay`；**仅展示层，不改动 `date` 存储**。
+  - `TaskRepository` 新增只读查询 `tasksForDisplayDay(_:)`（Core Data 谓词：`date == day OR (remindAt 落在 day 当天)`），`LocalTaskRepository` 实现；`reload()` 改用该查询并按 `displayDay` 二次过滤，把跨 0 点任务并入触发日「进行中」。
+  - 首页分区改为「错过的提醒 / 进行中 / 已完成」三区块；进行中可拖拽（`reorderInProgress`，仅作用于展示区块，复用 M1 `reorder`）。
+
+- **R-4 设置页（AC-22）**：
+  - 新增 `Views/SettingsView.swift`：通知/麦克风权限状态（绿点/灰点 + 文案）+ 两个「去系统设置」深链、`语音输入开关`（持久化 `UserDefaults`，默认开；关后首页麦克风禁用，复用 `setVoiceInputEnabled`）、默认提醒策略只读展示、P0-1 隐私说明文案块。
+  - 首页右上角齿轮（`ToolbarItem`）以 `.sheet` 弹出（挂在内部 VStack，避免与提醒设置 `.sheet` 同视图冲突）。
+
+- **R-4 合并/拆分 UI（AC-5）**：
+  - `TaskRowView` 新增 `.contextMenu`：「合并到上一条」「从此处拆分」；分别调 `vm.mergeWithPrevious(_:)` / `requestSplit(_:)`。
+  - 合并：`mergeWithPrevious` 取「进行中」列表紧邻前序与当前条，`TaskMergeSplitUseCase.merge`（M3 已实现，复用 `update/add/delete` 落库，重启保持）；首条不可合并。
+  - 拆分：`requestSplit` 默认按首个拆分标点（取自 `asr_split_config.json`）之后断开，弹 `alert` 允许手动填字符序号，调 `vm.split(_:at:)`（M3 已实现）。
+
+- **R-3 口径**：本端采用 M3「尾句单独成条」口径（M3 已实现，无需改代码）；PRD R-E2/AC-3 由产品角色据 M4 规格回写。
+
+### 刻意未做 / 待确认（M4 · iOS）
+- **DND/Focus 检测**：iOS 无可靠公开 API 检测勿扰（规格 §2.1），仅以「通知权限 + 横幅引导」兜底，未做 Focus 拦截提示。
+- **埋点上报**（`missed_reminder_shown`/`notification_banner_shown`/`settings_open`/`todo_merge`/`todo_split`）：按规格仅留调用点语义，未接通上报逻辑。
+- **真机验证**：DND 拦截、跨日触发、合并/拆分手感需真机验证（同 M1/M2/M3 验收跟进项）；本沙箱无 Xcode，未编译。
+
 ## 与规格的偏差 / 待确认点
 - **Core Data 多对多建模**：iOS 采用原生 many-to-many 关系（`Task.tags`），Android Room 用显式 `task_tag` 关联表；
   两者语义等价，属双端存储差异的正常取舍（规格 §6 实体清单含 TaskTag，Room 侧已落表）。

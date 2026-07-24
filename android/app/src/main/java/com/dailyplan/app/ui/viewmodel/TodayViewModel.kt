@@ -4,9 +4,11 @@
 
 package com.dailyplan.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.dailyplan.app.data.repository.TaskRepository
+import com.dailyplan.app.data.reminder.NotificationStatusHelper
 import com.dailyplan.app.data.reminder.ReminderScheduler
 import com.dailyplan.app.data.voice.ASRController
 import com.dailyplan.app.data.voice.DegradeReason
@@ -14,28 +16,55 @@ import com.dailyplan.app.data.voice.VoiceState
 import com.dailyplan.app.domain.model.Task
 import com.dailyplan.app.domain.model.TaskSource
 import com.dailyplan.app.domain.model.todayDateString
+import com.dailyplan.app.domain.voice.TaskMergeSplitUseCase
 import com.dailyplan.app.domain.voice.VoiceTaskSplitter
 import com.dailyplan.app.util.ASRSplitConfig
+import com.dailyplan.app.util.SettingsPrefs
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.Date
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+/**
+ * 首页常驻提示状态（规格 §2 / AC-20，D4）：仅在有权限风险时非 null。
+ * 埋点调用点：notification_banner_shown（仅标注，不写上报）。
+ */
+data class NotificationBannerInfo(
+    val reason: Reason,
+    val deepLink: DeepLink
+) {
+    enum class Reason { NOTIFICATIONS_DISABLED, DND_ACTIVE }
+    enum class DeepLink { APP_NOTIFICATION_SETTINGS, POLICY_ACCESS_SETTINGS }
+}
+
 class TodayViewModel(
     private val repository: TaskRepository,
     private val reminderScheduler: ReminderScheduler,
     private val asrController: ASRController,
-    asrSplitConfig: ASRSplitConfig?
+    asrSplitConfig: ASRSplitConfig?,
+    private val mergeSplitUseCase: TaskMergeSplitUseCase,
+    private val settingsPrefs: SettingsPrefs
 ) : ViewModel() {
 
     // M3 语音层：领域拆分器（config 缺失则为 null，语音不可用）
     private val voiceSplitter: VoiceTaskSplitter? =
         asrSplitConfig?.let { VoiceTaskSplitter(it, repository) }
 
-    // 当日任务列表（从库加载，规格 AC-17 F6）
+    // 当日任务列表（按展示日取数，含跨 0 点任务，规格 §3.3 / S5）
     private val _tasks = MutableStateFlow<List<Task>>(emptyList())
     val tasks: StateFlow<List<Task>> = _tasks.asStateFlow()
+
+    // M4-S5 三个展示区块：错过的提醒 / 进行中 / 已完成（displayDay == 今日）
+    private val _missedTasks = MutableStateFlow<List<Task>>(emptyList())
+    val missedTasks: StateFlow<List<Task>> = _missedTasks.asStateFlow()
+    private val _inProgressTasks = MutableStateFlow<List<Task>>(emptyList())
+    val inProgressTasks: StateFlow<List<Task>> = _inProgressTasks.asStateFlow()
+    private val _doneTasks = MutableStateFlow<List<Task>>(emptyList())
+    val doneTasks: StateFlow<List<Task>> = _doneTasks.asStateFlow()
+
+    // M4 平铺展示顺序（错过的提醒 → 进行中 → 已完成），供合并「上一条」与拖拽重排定位
+    private val _flatOrder = MutableStateFlow<List<Task>>(emptyList())
 
     // 输入框文本
     private val _inputText = MutableStateFlow("")
@@ -43,6 +72,10 @@ class TodayViewModel(
 
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    // MARK: - D4 首页常驻提示
+    private val _notificationBanner = MutableStateFlow<NotificationBannerInfo?>(null)
+    val notificationBanner: StateFlow<NotificationBannerInfo?> = _notificationBanner.asStateFlow()
 
     // MARK: - M3 语音状态
     private val _voiceState = MutableStateFlow<VoiceState>(VoiceState.Idle)
@@ -52,9 +85,13 @@ class TodayViewModel(
     private val _partialText = MutableStateFlow("")
     val partialText: StateFlow<String> = _partialText.asStateFlow()
 
+    // M4 R-4 语音输入开关（持久化于 SettingsPrefs）
+    private val _voiceInputEnabled = MutableStateFlow(settingsPrefs.voiceInputEnabled)
+    val voiceInputEnabled: StateFlow<Boolean> = _voiceInputEnabled.asStateFlow()
+
     /** 进度 X / Y（规格 R-U3 / AC-15）：X=已完成数，Y=当日总数 */
-    val doneCount: Int get() = _tasks.value.count { it.isDone }
-    val totalCount: Int get() = _tasks.value.size
+    val doneCount: Int get() = _doneTasks.value.size
+    val totalCount: Int get() = _missedTasks.value.size + _inProgressTasks.value.size + _doneTasks.value.size
 
     init {
         reload()
@@ -62,11 +99,20 @@ class TodayViewModel(
         asrController.onDegrade = { reason -> onVoiceDegraded(reason) }
     }
 
-    // MARK: - F6 加载
+    // MARK: - F6 加载（按展示日取数；S5 重归类为展示层，不改 date）
     fun reload() {
         viewModelScope.launch {
-            runCatching { repository.todayTasks() }
-                .onSuccess { _tasks.value = it }
+            runCatching { repository.tasksByDisplayDay(todayDateString()) }
+                .onSuccess { all ->
+                    _tasks.value = all
+                    val now = Date()
+                    // D3 错过区：应响未响（remindAt < now 且未完成且 displayDay==今日）
+                    _missedTasks.value = all.filter { !it.isDone && it.remindAt != null && it.remindAt < now }
+                        .sortedBy { it.remindAt }
+                    _inProgressTasks.value = all.filter { !it.isDone && !(it.remindAt != null && it.remindAt < now) }
+                    _doneTasks.value = all.filter { it.isDone }
+                    _flatOrder.value = _missedTasks.value + _inProgressTasks.value + _doneTasks.value
+                }
                 .onFailure { _errorMessage.value = "加载待办失败：${it.message}" }
         }
     }
@@ -99,9 +145,9 @@ class TodayViewModel(
     }
 
     // MARK: - M3 语音输入（F2）
-    /** 开始持续听写。config 缺失 / 能力不可用 → 置 Unavailable，不阻断文字流（规格 §6） */
+    /** 开始持续听写。语音开关关闭 / config 缺失 / 能力不可用 → 置 Unavailable，不阻断文字流（规格 §6） */
     fun startVoice() {
-        if (voiceSplitter == null || !asrController.isAvailable) {
+        if (!_voiceInputEnabled.value || voiceSplitter == null || !asrController.isAvailable) {
             _voiceState.value = VoiceState.Unavailable
             return
         }
@@ -214,9 +260,11 @@ class TodayViewModel(
         }
     }
 
-    // MARK: - F5 拖拽重排（AC-16）
+    // MARK: - F5 拖拽重排（AC-16），基于平铺展示顺序（与首页索引一致）
     fun reorder(from: Int, to: Int) {
-        val reordered = _tasks.value.toMutableList().apply { add(to, removeAt(from)) }
+        val list = _flatOrder.value
+        if (from !in list.indices || to !in list.indices) return
+        val reordered = list.toMutableList().apply { add(to, removeAt(from)) }
         val ids = reordered.map { it.id }
         viewModelScope.launch {
             runCatching { repository.reorder(ids) }
@@ -258,6 +306,61 @@ class TodayViewModel(
         viewModelScope.launch {
             runCatching { reminderScheduler.rescheduleAllPending() }
             reload()   // 刷新可能因通知 Action 变化的完成态
+        }
+    }
+
+    // MARK: - D4 首页常驻提示（规格 §2 / AC-20）
+    /** 重新检测通知可达性风险并刷新常驻横幅状态（进入前台 / 从设置返回时调用）。 */
+    fun refreshNotificationStatus(context: Context) {
+        val status = NotificationStatusHelper.getStatus(context)
+        _notificationBanner.value = when {
+            !status.notificationsEnabled ->
+                NotificationBannerInfo(NotificationBannerInfo.Reason.NOTIFICATIONS_DISABLED,
+                    NotificationBannerInfo.DeepLink.APP_NOTIFICATION_SETTINGS)
+            status.dndBlocking ->
+                NotificationBannerInfo(NotificationBannerInfo.Reason.DND_ACTIVE,
+                    NotificationBannerInfo.DeepLink.POLICY_ACCESS_SETTINGS)
+            else -> null
+        }
+        // 埋点调用点：notification_banner_shown（仅标注，不写上报）
+    }
+
+    /** 点击常驻横幅 → 深链到对应系统设置页（规格 §2.3） */
+    fun openNotificationSettings(context: Context) {
+        val banner = _notificationBanner.value ?: return
+        val intent = when (banner.deepLink) {
+            NotificationBannerInfo.DeepLink.APP_NOTIFICATION_SETTINGS ->
+                NotificationStatusHelper.appNotificationSettingsIntent(context)
+            NotificationBannerInfo.DeepLink.POLICY_ACCESS_SETTINGS ->
+                NotificationStatusHelper.policyAccessSettingsIntent()
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+    }
+
+    // MARK: - R-4 语音输入开关（规格 §4.1，持久化）
+    fun setVoiceInputEnabled(enabled: Boolean) {
+        settingsPrefs.voiceInputEnabled = enabled
+        _voiceInputEnabled.value = enabled
+        if (!enabled) stopVoice()   // 关闭即停止当前录音
+    }
+
+    // MARK: - R-4 合并/拆分（规格 §4.2 / AC-5，复用 M3 TaskMergeSplitUseCase）
+    /** 合并当前条到上一条（相邻、同展示日）。埋点：todo_merge */
+    fun mergeWithPrevious(current: Task, previous: Task) {
+        viewModelScope.launch {
+            runCatching { mergeSplitUseCase.merge(listOf(previous, current)) }
+                .onSuccess { reload() }
+                .onFailure { _errorMessage.value = "合并失败：${it.message}" }
+        }
+    }
+
+    /** 在当前条的指定字符位置拆分。埋点：todo_split */
+    fun splitTask(task: Task, at: Int) {
+        viewModelScope.launch {
+            runCatching { mergeSplitUseCase.split(task, at) }
+                .onSuccess { reload() }
+                .onFailure { _errorMessage.value = "拆分失败：${it.message}" }
         }
     }
 }

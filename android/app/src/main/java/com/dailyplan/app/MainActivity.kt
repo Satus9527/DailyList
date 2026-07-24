@@ -58,6 +58,8 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // 进入前台补偿：重建未来 7 天提醒（规格 §4.4 / §5）
         viewModel.rescheduleReminders()
+        // M4 D4：重算首页常驻提示（通知权限 / DND 风险，规格 §2 / AC-20）
+        viewModel.refreshNotificationStatus(this)
         // 首次 DND 引导：若未获「绕过勿扰」授权，跳转系统设置（规格 §4.5，内部 SharedPreferences 去重）
         DndPolicyHelper.maybeRequestDndPolicy(this)
     }

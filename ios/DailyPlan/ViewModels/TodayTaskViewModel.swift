@@ -2,10 +2,13 @@
 // 今日待办 ViewModel：聚合 F1（文字记录）/ F5（完成/编辑/删除/拖拽）/ F6（持久化）与 X/Y 进度。
 // UI 经 ViewModel 调 Repository，领域层不依赖具体存储（架构 §7.2）。
 
+import AVFoundation
 import Combine
 import CoreData
 import Foundation
 import SwiftUI
+import UIKit
+import UserNotifications
 
 final class TodayTaskViewModel: ObservableObject {
     // MARK: 发布状态
@@ -18,6 +21,19 @@ final class TodayTaskViewModel: ObservableObject {
     @Published var voiceAvailable = false       // 语音按钮是否可用（授权/能力判断）
     @Published var voicePartialText = ""        // 实时中间文本（仅展示，不落库）
     @Published var voiceToast: String?          // 降级/提示 Toast 文案（如「改用文字输入」）
+
+    // —— M4 D4：通知/麦克风权限状态（规格 §2）——
+    @Published var notificationAuthStatus: UNAuthorizationStatus = .notDetermined
+    @Published var micAuthStatus: AVAudioSession.RecordPermission = .undetermined
+    /// 用户本次会话是否临时收起横幅（不持久化，避免掩盖风险，规格 §2.2）
+    @Published var bannerDismissedThisSession = false
+    /// D4 横幅可见：仅当通知未授权（含 provisional/denied/notDetermined，视为「可能不达」）时显示。
+    var showNotificationBanner: Bool {
+        notificationAuthStatus != .authorized && !bannerDismissedThisSession
+    }
+
+    // —— M4 R-4：语音输入开关（持久化 UserDefaults，默认开）——
+    @Published var voiceInputEnabled: Bool
 
     /// 进度 X / Y（规格 R-U3 / AC-15）：X=已完成数，Y=当日总数
     var doneCount: Int { tasks.filter { $0.isDone }.count }
@@ -34,6 +50,11 @@ final class TodayTaskViewModel: ObservableObject {
     private let splitter: VoiceTaskSplitter
     /// 合并/拆分用例（F2 待确认项 5，基础版，规格 §7）
     let mergeSplit: TaskMergeSplitUseCase
+    /// 语音基础能力（授权 + 配置非空），与 voiceInputEnabled 共同决定按钮可用（R-4 设置页开关）
+    private let voiceCapable: Bool
+
+    /// 语音输入开关的持久化键（R-4 设置页）
+    private let voiceInputKey = "dailyplan.voiceInputEnabled"
 
     init(context: NSManagedObjectContext, scheduler: ReminderScheduler, config: ASRSplitConfig) {
         self.context = context
@@ -45,7 +66,10 @@ final class TodayTaskViewModel: ObservableObject {
         self.splitter = VoiceTaskSplitter(config: effectiveConfig, repository: repository)
         self.mergeSplit = NativeTaskMergeSplitUseCase(repository: repository)
         // 配置缺失（空标点集）视为语音不可用，避免无意义启动（P0-4：绝不硬编码常量）
-        self.voiceAvailable = asr.isAvailable && !effectiveConfig.splitPunctuation.isEmpty
+        self.voiceCapable = asr.isAvailable && !effectiveConfig.splitPunctuation.isEmpty
+        // 从 UserDefaults 读取语音输入开关（R-4 设置页；默认开）
+        self.voiceInputEnabled = UserDefaults.standard.object(forKey: "dailyplan.voiceInputEnabled") as? Bool ?? true
+        self.voiceAvailable = voiceCapable && self.voiceInputEnabled
         // 降级回调：关语音按钮 + Toast 引导文字（规格 §6）
         asr.onDegrade = { [weak self] reason in
             self?.handleDegrade(reason)
@@ -54,12 +78,57 @@ final class TodayTaskViewModel: ObservableObject {
     }
 
     // MARK: - F6 加载（从库而非内存，规格 AC-17）
+    // M4 S5：改用展示日取数 tasksForDisplayDay，把跨 0 点（remindAt 所属日 == 今日）任务并入当日列表，
+    // 再按 displayDay 二次过滤（不改动 date 存储）。
     func reload() {
+        let today = DateFormatter.todayDateString()
         do {
-            tasks = try repository.todayTasks()
+            let all = try repository.tasksForDisplayDay(today)
+            tasks = all.filter { $0.displayDay == today }
         } catch {
             errorMessage = "加载待办失败：\(error.localizedDescription)"
         }
+        refreshPermissions()   // 每次加载顺带刷新权限状态（D4 横幅）
+    }
+
+    // MARK: - M4 D3 分区（首页三区块，均由 tasks 派生）
+    /// 错过的提醒（应响未响）：未完成 + remindAt 已过当前时刻（displayDay==今日由 tasks 保证）。
+    var missedTasks: [TaskDTO] {
+        let now = Date()
+        tasks.filter { !$0.isDone && $0.remindAt != nil && $0.remindAt! < now }
+    }
+    /// 进行中（未完成且非错过项）。
+    var inProgressTasks: [TaskDTO] {
+        tasks.filter { !$0.isDone && !missedTasks.contains($0) }
+    }
+    /// 已完成（置底）。
+    var doneTasks: [TaskDTO] {
+        tasks.filter { $0.isDone }
+    }
+
+    // MARK: - M4 D4 权限检测与系统设置深链
+    /// 刷新通知/麦克风授权状态（规格 §2.1）。通知经 getNotificationSettings 异步回填。
+    func refreshPermissions() {
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
+            DispatchQueue.main.async {
+                self?.notificationAuthStatus = settings.authorizationStatus
+            }
+        }
+        micAuthStatus = AVAudioSession.sharedInstance().recordPermission
+    }
+
+    /// 深链到本 App 系统设置（通知/麦克风权限统一入口，规格 §2.3）。
+    func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    // MARK: - M4 R-4 语音输入开关
+    /// 设置页切换语音输入开关并持久化（默认开；关闭后首页语音按钮禁用）。
+    func setVoiceInputEnabled(_ on: Bool) {
+        voiceInputEnabled = on
+        UserDefaults.standard.set(on, forKey: voiceInputKey)
+        voiceAvailable = voiceCapable && on
     }
 
     // MARK: - F1 文字记录
@@ -180,9 +249,10 @@ final class TodayTaskViewModel: ObservableObject {
         }
     }
 
-    // MARK: - F5 拖拽重排（AC-16）
-    func reorder(from source: IndexSet, to destination: Int) {
-        var reordered = tasks
+    // MARK: - F5 拖拽重排（AC-16，M4 S5 仅作用于「进行中」展示区）
+    /// 仅对当前展示的「进行中」区块重排并持久化（跨 0 点项也参与当日展示排序；不改动 date）。
+    func reorderInProgress(from source: IndexSet, to destination: Int) {
+        var reordered = inProgressTasks
         reordered.move(fromOffsets: source, toOffset: destination)
         let ids = reordered.map { $0.id }
         do {
@@ -191,6 +261,16 @@ final class TodayTaskViewModel: ObservableObject {
         } catch {
             errorMessage = "排序失败：\(error.localizedDescription)"
         }
+    }
+
+    // MARK: - M4 R-4 合并到上一条（AC-5，调用 M3 TaskMergeSplitUseCase）
+    /// 取「进行中」列表中紧邻当前条的前一条（同展示顺序）作为参数，与当前条合并。
+    /// 首条不可合并到上一条（无前序则忽略）。
+    func mergeWithPrevious(_ task: TaskDTO) {
+        let inProg = inProgressTasks
+        guard let idx = inProg.firstIndex(where: { $0.id == task.id }), idx > 0 else { return }
+        let prev = inProg[idx - 1]
+        merge([prev, task])   // 复用 M3 合并用例，落库后 reload 刷新（规格 §4.2）
     }
 
     // MARK: - F2 语音（M3）
