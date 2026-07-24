@@ -117,6 +117,62 @@ android/
   3. 通知 Action 的 `markDone` 经 Receiver 写入，未主动刷新 Compose 列表（依赖下次 `onResume` 的 `reload`）；如需实时刷新，建议 `todayTasks` 改为 `Flow` 持续观察。
   4. 端到端触发（Doze/重启/DND/时区切换）需真机验证（同 M1 验收跟进项 7/8）。
 
+## M3（F2 语音）Android 完成项与未做项
+
+> 阶段：M3（在 M1 数据层 + M2 通知层之上实现 Android 语音层）。依据 `设计规格_M3语音层.md`。
+> 分层：语音层 `data/voice/`、领域拆分器 `domain/voice/`，均不新增 Task 字段；落库复用 M1 `TaskRepository.add(source=VOICE)`。
+
+### 新增文件
+- `data/voice/ASRController.kt`：平台无关 ASR 接口（规格 §2.2）——`isAvailable` / `suspend requestPermission()` / `start(onPartial,onFinal)` / `stop()` / `getBufferedText()` / `onDegrade`。
+- `data/voice/PermissionState.kt` / `DegradeReason.kt` / `VoiceState.kt`：授权状态、降级原因、UI 语音状态枚举。
+- `data/voice/NativeASRController.kt`：`android.speech.SpeechRecognizer` 实现（规格 §4）。
+- `domain/voice/VoiceTaskSplitter.kt`：领域层自动拆分器（规格 §5），仅依赖 `ASRSplitConfig` 与 `TaskRepository`，不 import Speech。
+
+### NativeASRController 要点（规格 §4.1–§4.4）
+- 持续听：`EXTRA_LANGUAGE_MODEL=FREE_FORM`、`EXTRA_LANGUAGE="zh-CN"`、`EXTRA_PARTIAL_RESULTS=true`；`onResults` 后 `beginListening()` 形成持续听循环。
+- 离线优先 → 联网回退（P0-1）：`EXTRA_PREFER_OFFLINE=true`；`ERROR_NETWORK` 首次重试一次，仍失败降级。
+- 长停顿边界：`onRmsChanged` 监测静音累计，阈值取自 `config.splitPauseThresholdMs`（**禁止硬编码 1200**）；触发时把 `latestPartial` 作为一次 final 吐出，并置 `awaitingResultsAfterPause` 避免随后 `onResults` 重复落库。
+- `onError` 映射（§6.1）：`ERROR_INSUFFICIENT_PERMISSIONS`→降级；`ERROR_NETWORK`→重试/降级；`ERROR_NO_MATCH`/`ERROR_SPEECH_TIMEOUT`→重启循环继续听（不生成空条）；其余→降级。
+- `AudioFocus`：`AUDIOFOCUS_LOSS` 永久丢失→降级；`LOSS_TRANSIENT` 暂停（保留状态）、`GAIN` 恢复重听（§4.4）。
+- `stop()` 前把尾句作为一次 final 收尾（空不回调，R-X4）。
+
+### VoiceTaskSplitter 如何消费 asr_split_config.json（P0-4 防漂移）
+- `AppContainer` 启动时由 `assets/asr_split_config.json` 经 `ASRSplitConfig.load()` 解析为单例（M1 已建结构）；config 为 null 时语音入口判不可用，记录流不中断。
+- 拆分常量**全部来自 config**：`splitPunctuation` 转 `Set<String>` 仅其触发切分并丢弃尾标点；`includeEnumerationComma=false`→「、」保留在 title 内不切；`includeNewline=false`→换行保留不切；长停顿阈值取 `splitPauseThresholdMs`。
+- 代码中**无任何拆分标点/1200 字面量**（CI/Review 可校验）。每段非空 → `Task.makeNew(source=VOICE)` → `repository.add()`；超 500 字截断（AC-29）。用户手动「落一条」优先于自动信号（R-E2）。
+
+### 失败降级链（规格 §6）
+- 触发：权限拒 / 无网无离线包 / 识别失败 / AudioFocus 永久丢失 → `onDegrade(reason)`。
+- ViewModel 置 `VoiceState.Degraded` → 麦克风按钮置灰 + **Snackbar**「语音暂不可用，请改用文字输入」（`Scaffold` 承载）；文字输入保持可用（R-X1 / AC-6）。
+- 提供「停止并保存当前已识别文本」：`saveBufferedAsText()` 把缓冲以**文字条目**（`source=TEXT`）落库，避免丢失已说内容；为空不落（R-X4）。
+
+### 与 M1 接线
+- `AppContainer` 注入 `NativeASRController` 与 `asrSplitConfig` 到 `TodayViewModel`；`TodayViewModel` 据 config 构造 `VoiceTaskSplitter`。
+- 语音 final → `VoiceTaskSplitter.commitFinalSegment` → `repository.add(source=VOICE)`；Room 重载自动刷新列表，与 M1 文字输入并存，零返工。
+- 新增语音状态 `voiceState` / `partialText` + 方法 `startVoice/stopVoice/commitManual/saveBufferedAsText/onPermissionDenied`。
+- `TodayScreen` 加麦克风开关、实时 partial 文本、「落一条」「停止并保存」按钮；`RECORD_AUDIO` 运行时申请（`rememberLauncherForActivityResult`）；降级 Toast。
+
+### F2 语音输入 UI（M3-D，Task #50 · `ui/screen/TodayScreen.kt`）
+- **麦克风 FAB/按钮与文字输入并存**：列表上方麦克风 `IconButton` 切换录音（许可 `RECORD_AUDIO` 运行时申请）；
+  与底部 `OutlinedTextField` 文字输入互不干扰；降级（`VoiceState.Degraded`）/ 不可用（`Unavailable`）时按钮置灰。
+- **录音态视觉反馈**：听写中（`VoiceState.Listening`）显示红点脉冲（`VoiceRecordingIndicator` 呼吸式缩放+透明度）、
+  `mm:ss` 计时（`LaunchedEffect` 1 秒心跳累加）、简易波形竖条（`VoiceWaveformBars` 起伏），纯视觉、不阻塞文字流。
+- **实时中间文本**：`partialText` 经 `onPartial` 实时显示于控制条（空时显示「聆听中…」），仅展示不落库。
+- **自动落一条**：`onFinal → splitter.commitFinalSegment` 按 JSON 标点切分并 `source=VOICE` 落库后刷新列表（Room 自动刷新）。
+- **手动「落一条」**：`commitManual()` 把当前缓冲/partial 立即切分落库（优先于自动信号，R-E2）。
+- **「停止并保存」**：`saveBufferedAsText()` 把当前缓冲以**文字条目**（`source=TEXT`）落库，避免丢失已说内容；为空不落（R-X4）。
+- **降级 UI**：`VoiceState.Degraded` → 麦克风按钮置灰 + **Snackbar**「语音暂不可用，请改用文字输入」（由 `Scaffold` + `SnackbarHostState` 承载），文字录入仍可用（R-X1 / AC-6）。
+- `AndroidManifest.xml` 已加 `RECORD_AUDIO` 权限。
+
+### 刻意未做 / 需确认（M3）
+- **iOS 端实现**：本任务仅 Android；iOS `NativeASRController`/`VoiceTaskSplitter` 不在范围内。
+- **长按合并/拆分（§7 / AC-5）**：仅冻结接口语义，本 M3 未实现 `TaskMergeSplitUseCase`（标为后续）。
+- **设置页隐私文案（§8）**：P0-1 文案未在设置页落地，仅降级 Toast 引导；建议 M3.1 补「语音开关 + 重授权入口」。
+- **需确认 / 真机验证**：
+  1. `onRmsChanged` 静音阈值（`SILENCE_RMS_THRESHOLD=1.0f`）为平台音频调参，非拆分常量，但需真机校准；长停顿与端侧 `onEndOfSpeech`/`onResults` 的边界去重逻辑需真机验证避免重复句段。
+  2. 离线包回退联网的 `EXTRA_PREFER_OFFLINE` 行为因设备/系统版本而异，需真机验证 P0-1 链路与「停止并保存」时序。
+  3. `SpeechRecognizer` 为 Google 服务依赖，非所有 ROM 内置；`isAvailable=false` 时降级路径已就绪。
+
 ## 与规格的偏差 / 待确认点
 - **Room 多对多**：Android 用显式 `task_tag` 关联表（规格 §7.2）；iOS 用原生 many-to-many，两者语义等价。
 - **拖拽手势**：M1 排序通过「上移/下移」按钮驱动 `reorder`（持久化已验证），完整手指拖拽建议 F4 阶段增强。

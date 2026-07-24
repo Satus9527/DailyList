@@ -8,8 +8,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.dailyplan.app.data.repository.TaskRepository
 import com.dailyplan.app.data.reminder.ReminderScheduler
+import com.dailyplan.app.data.voice.ASRController
+import com.dailyplan.app.data.voice.DegradeReason
+import com.dailyplan.app.data.voice.VoiceState
 import com.dailyplan.app.domain.model.Task
+import com.dailyplan.app.domain.model.TaskSource
 import com.dailyplan.app.domain.model.todayDateString
+import com.dailyplan.app.domain.voice.VoiceTaskSplitter
+import com.dailyplan.app.util.ASRSplitConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.Date
 import kotlinx.coroutines.flow.StateFlow
@@ -18,8 +24,14 @@ import kotlinx.coroutines.launch
 
 class TodayViewModel(
     private val repository: TaskRepository,
-    private val reminderScheduler: ReminderScheduler
+    private val reminderScheduler: ReminderScheduler,
+    private val asrController: ASRController,
+    asrSplitConfig: ASRSplitConfig?
 ) : ViewModel() {
+
+    // M3 语音层：领域拆分器（config 缺失则为 null，语音不可用）
+    private val voiceSplitter: VoiceTaskSplitter? =
+        asrSplitConfig?.let { VoiceTaskSplitter(it, repository) }
 
     // 当日任务列表（从库加载，规格 AC-17 F6）
     private val _tasks = MutableStateFlow<List<Task>>(emptyList())
@@ -32,12 +44,22 @@ class TodayViewModel(
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
 
+    // MARK: - M3 语音状态
+    private val _voiceState = MutableStateFlow<VoiceState>(VoiceState.Idle)
+    val voiceState: StateFlow<VoiceState> = _voiceState.asStateFlow()
+
+    /** 语音流式中间文本（实时展示，不落库） */
+    private val _partialText = MutableStateFlow("")
+    val partialText: StateFlow<String> = _partialText.asStateFlow()
+
     /** 进度 X / Y（规格 R-U3 / AC-15）：X=已完成数，Y=当日总数 */
     val doneCount: Int get() = _tasks.value.count { it.isDone }
     val totalCount: Int get() = _tasks.value.size
 
     init {
         reload()
+        // 降级回调：关语音按钮 + 引导文字（规格 §6）；Toast 由 UI 观察 voiceState 展示
+        asrController.onDegrade = { reason -> onVoiceDegraded(reason) }
     }
 
     // MARK: - F6 加载
@@ -74,6 +96,77 @@ class TodayViewModel(
                 }
                 .onFailure { _errorMessage.value = "添加失败：${it.message}" }
         }
+    }
+
+    // MARK: - M3 语音输入（F2）
+    /** 开始持续听写。config 缺失 / 能力不可用 → 置 Unavailable，不阻断文字流（规格 §6） */
+    fun startVoice() {
+        if (voiceSplitter == null || !asrController.isAvailable) {
+            _voiceState.value = VoiceState.Unavailable
+            return
+        }
+        _voiceState.value = VoiceState.Listening
+        _partialText.value = ""
+        asrController.start(
+            onPartial = { _partialText.value = it },
+            onFinal = { text -> commitVoiceSegment(text) }   // 句段边界 → 切分落库
+        )
+    }
+
+    /** 语音 final 文本 → 领域层切分 → 逐段 add(source=VOICE)；随后刷新列表 */
+    private fun commitVoiceSegment(text: String) {
+        val splitter = voiceSplitter ?: return
+        viewModelScope.launch {
+            val startOrder = (_tasks.value.maxOfOrNull { it.sortOrder } ?: -1) + 1
+            splitter.commitFinalSegment(text, startOrder = startOrder)
+            reload()
+        }
+    }
+
+    /** 停止听写（用户主动） */
+    fun stopVoice() {
+        asrController.stop()
+        _voiceState.value = VoiceState.Idle
+        _partialText.value = ""
+    }
+
+    /** 用户手动「落一条」：把当前缓冲/partial 立即切分落库（用户优先，R-E2） */
+    fun commitManual() {
+        val text = asrController.getBufferedText().ifBlank { _partialText.value }
+        if (text.isNotBlank()) {
+            _partialText.value = ""
+            commitVoiceSegment(text)
+        }
+    }
+
+    /**
+     * 「停止并保存当前已识别文本」为文字条目（source=TEXT，规格 §6.2）。
+     * 避免丢失已说内容；为空则不落（R-X4）。
+     */
+    fun saveBufferedAsText() {
+        val text = asrController.getBufferedText().ifBlank { _partialText.value }
+        if (text.isNotBlank()) {
+            viewModelScope.launch {
+                val startOrder = (_tasks.value.maxOfOrNull { it.sortOrder } ?: -1) + 1
+                repository.add(Task.makeNew(title = text.take(500), source = TaskSource.TEXT, sortOrder = startOrder))
+                reload()
+            }
+        }
+        asrController.stop()
+        _voiceState.value = VoiceState.Idle
+        _partialText.value = ""
+    }
+
+    /** 权限被拒（UI 申请后回调）：降级引导文字输入（规格 §6） */
+    fun onPermissionDenied() {
+        _voiceState.value = VoiceState.Degraded(DegradeReason.PERMISSION_DENIED)
+        _partialText.value = ""
+    }
+
+    /** 降级处理：关语音按钮 + UI 弹 Toast 引导（规格 §6） */
+    private fun onVoiceDegraded(reason: DegradeReason) {
+        _voiceState.value = VoiceState.Degraded(reason)
+        _partialText.value = ""
     }
 
     // MARK: - F5 完成

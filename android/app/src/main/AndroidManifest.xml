@@ -4,6 +4,8 @@
 
     <!-- 通知权限：Android 13+ 必需（规格 §4.5） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 语音输入麦克风权限（规格 M3 §4.4 / F2），运行时申请 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 绕过勿扰（DND）授权，setBypassDnd 需要（规格 §4.5） -->
     <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <!-- 重启后由 BootReceiver 触发二次补偿（规格 §4.4 / §5） -->

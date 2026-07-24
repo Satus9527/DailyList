@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 应用标识与版本信息（最小宿主键） -->
+	<key>CFBundleName</key>
+	<string>DailyPlan</string>
+	<key>CFBundleDisplayName</key>
+	<string>DailyPlan</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.dailyplan.app</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+
+	<!-- 启动屏：空字典避免缺少 UILaunchScreen 的编译警告 -->
+	<key>UILaunchScreen</key>
+	<dict/>
+
+	<!-- 麦克风权限：NativeASRController 使用 AVAudioEngine 录音所需 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>每日计划需要使用麦克风以进行语音记录待办</string>
+
+	<!-- 语音识别权限：NativeASRController 调用 SFSpeechRecognizer 转写所需 -->
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>每日计划需要使用语音识别，将您的语音转为文字待办（可离线识别）</string>
+</dict>
+</plist>

@@ -13,6 +13,12 @@ final class TodayTaskViewModel: ObservableObject {
     @Published var inputText: String = ""
     @Published var errorMessage: String?
 
+    // —— F2 语音（M3）发布状态 ——
+    @Published var isVoiceActive = false       // 语音听写进行中
+    @Published var voiceAvailable = false       // 语音按钮是否可用（授权/能力判断）
+    @Published var voicePartialText = ""        // 实时中间文本（仅展示，不落库）
+    @Published var voiceToast: String?          // 降级/提示 Toast 文案（如「改用文字输入」）
+
     /// 进度 X / Y（规格 R-U3 / AC-15）：X=已完成数，Y=当日总数
     var doneCount: Int { tasks.filter { $0.isDone }.count }
     var totalCount: Int { tasks.count }
@@ -23,10 +29,27 @@ final class TodayTaskViewModel: ObservableObject {
     /// 通知调度器（F3，M2）：完成即取消、取消完成恢复、设/改提醒排程均经此。
     private let scheduler: ReminderScheduler
 
-    init(context: NSManagedObjectContext, scheduler: ReminderScheduler) {
+    // —— F2 语音层（M3）——
+    private let asr: NativeASRController
+    private let splitter: VoiceTaskSplitter
+    /// 合并/拆分用例（F2 待确认项 5，基础版，规格 §7）
+    let mergeSplit: TaskMergeSplitUseCase
+
+    init(context: NSManagedObjectContext, scheduler: ReminderScheduler, config: ASRSplitConfig) {
         self.context = context
         self.repository = LocalTaskRepository(context: context)
         self.scheduler = scheduler
+        // 配置缺失时降级为「语音不可用」，但绝不硬编码拆分常量（P0-4 精神）
+        let effectiveConfig = config
+        self.asr = NativeASRController(config: effectiveConfig)
+        self.splitter = VoiceTaskSplitter(config: effectiveConfig, repository: repository)
+        self.mergeSplit = NativeTaskMergeSplitUseCase(repository: repository)
+        // 配置缺失（空标点集）视为语音不可用，避免无意义启动（P0-4：绝不硬编码常量）
+        self.voiceAvailable = asr.isAvailable && !effectiveConfig.splitPunctuation.isEmpty
+        // 降级回调：关语音按钮 + Toast 引导文字（规格 §6）
+        asr.onDegrade = { [weak self] reason in
+            self?.handleDegrade(reason)
+        }
         reload()
     }
 
@@ -168,5 +191,108 @@ final class TodayTaskViewModel: ObservableObject {
         } catch {
             errorMessage = "排序失败：\(error.localizedDescription)"
         }
+    }
+
+    // MARK: - F2 语音（M3）
+
+    /// 麦克风按钮：已在进行则停止；否则先确认授权再开始持续听。
+    /// 未授权 → 关闭按钮 + Toast 引导文字（规格 §6）。
+    func toggleVoice() {
+        if isVoiceActive {
+            stopVoice()
+        } else {
+            Task { await beginVoiceIfPermitted() }
+        }
+    }
+
+    @MainActor
+    private func beginVoiceIfPermitted() async {
+        let state = await asr.requestPermission()
+        guard state == .granted else {
+            voiceAvailable = false
+            voiceToast = "语音不可用，请改用文字输入"   // R-X1：记录流不中断，文字录入仍可用
+            return
+        }
+        voiceAvailable = asr.isAvailable
+        startVoice()
+    }
+
+    /// 开始持续听：onPartial 实时展示，onFinal → 领域层按 JSON 配置切分并落库（source=.voice）。
+    private func startVoice() {
+        voiceToast = nil
+        do {
+            try asr.start(
+                onPartial: { [weak self] text in
+                    self?.voicePartialText = text          // 仅展示
+                },
+                onFinal: { [weak self] text in
+                    guard let self else { return }
+                    self.splitter.commitFinalSegment(text) // 标点切分 + 落库（P0-4）
+                    self.voicePartialText = ""
+                    self.reload()                          // 落库触发列表刷新
+                }
+            )
+            isVoiceActive = true
+        } catch {
+            // 启动失败（如未授权/音频会话异常）→ 降级文字输入
+            voiceAvailable = false
+            voiceToast = "语音启动失败，请改用文字输入"
+        }
+    }
+
+    /// 停止听写：stop() 内部会对尾句再回调一次 onFinal → splitter 落库，随后释放音频。
+    func stopVoice() {
+        asr.stop()
+        isVoiceActive = false
+        voicePartialText = ""
+    }
+
+    /// 用户手动「落一条」（始终优先，R-E2）：把当前缓冲按 JSON 配置切分落库，并清空缓冲避免重复。
+    func commitManualSegment() {
+        let buffered = asr.bufferedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !buffered.isEmpty else { return }
+        splitter.commitFinalSegment(buffered)
+        asr.clearBuffer()
+        voicePartialText = ""
+        reload()
+    }
+
+    /// 停止并保存当前已识别文本为「文字条目」（降级兜底，规格 §6.2）：source=.text，避免丢失已说内容。
+    func saveBufferedAsText() {
+        let buffered = asr.bufferedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        asr.stop()
+        isVoiceActive = false
+        voicePartialText = ""
+        guard !buffered.isEmpty else { return }   // 空则不落（R-X4）
+        let title = buffered.count > 500 ? String(buffered.prefix(500)) : buffered
+        let task = TaskDTO.makeNew(title: title, source: .text)   // 视为文字条目
+        do {
+            try repository.add(task)
+            reload()
+        } catch {
+            voiceToast = "保存失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 失败降级（规格 §6.2）：关语音按钮 + Toast 引导文字；记录流不中断。
+    private func handleDegrade(_ reason: VoiceDegradeReason) {
+        asr.stop()
+        isVoiceActive = false
+        voiceAvailable = false
+        voicePartialText = ""
+        voiceToast = "语音暂不可用，请改用文字输入"   // R-X1：文字记录仍可用
+        // 本地日志标记 VOICE_DEGRADED（仅本地，不上传账号）
+    }
+
+    /// 合并相邻多条（F2 待确认项 5，基础版）
+    func merge(_ tasks: [TaskDTO]) {
+        do { try mergeSplit.merge(tasks); reload() }
+        catch { errorMessage = "合并失败：\(error.localizedDescription)" }
+    }
+
+    /// 在第 index 处拆分一条（F2 待确认项 5，基础版）
+    func split(_ task: TaskDTO, at index: Int) {
+        do { try mergeSplit.split(task, at: index); reload() }
+        catch { errorMessage = "拆分失败：\(error.localizedDescription)" }
     }
 }

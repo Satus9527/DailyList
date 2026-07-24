@@ -13,6 +13,8 @@ import com.dailyplan.app.data.repository.LocalTagRepository
 import com.dailyplan.app.data.repository.LocalTaskRepository
 import com.dailyplan.app.data.repository.TagRepository
 import com.dailyplan.app.data.repository.TaskRepository
+import com.dailyplan.app.data.voice.ASRController
+import com.dailyplan.app.data.voice.NativeASRController
 import com.dailyplan.app.data.reminder.ReminderNotificationHelper
 import com.dailyplan.app.data.reminder.ReminderScheduler
 import com.dailyplan.app.data.reminder.WorkManagerReminderScheduler
@@ -27,6 +29,14 @@ class AppContainer(context: Context) {
     val categoryRepository: CategoryRepository = LocalCategoryRepository(database)
     val tagRepository: TagRepository = LocalTagRepository(database)
 
+    /**
+     * M3 语音层（F2）：解析 assets/asr_split_config.json 为单例；据此构造 NativeASRController。
+     * config 为 null（assets 缺失）时语音入口将被判不可用，记录流不中断（规格 §6 / P0-4）。
+     */
+    val asrSplitConfig: com.dailyplan.app.util.ASRSplitConfig? =
+        com.dailyplan.app.util.ASRSplitConfig.load(appContext)
+    val asrController: ASRController = NativeASRController(appContext, asrSplitConfig)
+
     /** 通知层：渠道与展示 Helper（规格 §4.3） */
     val reminderNotificationHelper: ReminderNotificationHelper = ReminderNotificationHelper(appContext)
 
@@ -37,8 +47,9 @@ class AppContainer(context: Context) {
         taskRepository
     )
 
-    /** 创建今日 ViewModel（每次读取当日库），注入提醒调度器（M2 接线点） */
-    fun todayViewModel(): TodayViewModel = TodayViewModel(taskRepository, reminderScheduler)
+    /** 创建今日 ViewModel（每次读取当日库），注入提醒调度器与语音层（M2 / M3 接线点） */
+    fun todayViewModel(): TodayViewModel =
+        TodayViewModel(taskRepository, reminderScheduler, asrController, asrSplitConfig)
 
     /** 首启种子：写入预设分类（规格 §3.2）；失败不崩溃（规格 §10.4） */
     fun seedPresetCategoriesIfNeeded() {

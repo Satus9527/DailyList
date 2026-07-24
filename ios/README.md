@@ -24,7 +24,13 @@ ios/DailyPlan/
     CategoryRepository.swift      # 基础 CRUD（预设不可删，删自建回退「其他」）
     TagRepository.swift           # 基础 CRUD（写入前归一，AC-30）
   ViewModels/
-    TodayTaskViewModel.swift      # F1/F5/F6 聚合，X/Y 进度
+    TodayTaskViewModel.swift      # F1/F5/F6 聚合，X/Y 进度；M3 新增语音开关/降级/手动落一条
+  Speech/
+    ASRController.swift           # ASRController 协议 + PermissionState + NativeASRController（SFSpeechRecognizer+AVAudioEngine）
+    SilentPauseMonitor.swift      # 长停顿监测（阈值取自配置，禁止硬编码）
+  Domain/
+    VoiceTaskSplitter.swift       # 领域层自动拆分，消费 asr_split_config.json（P0-4）
+    TaskMergeSplitUseCase.swift   # 合并/拆分基础版（§7，冻结接口，复用 Repository）
   Views/
     TodayView.swift               # 首页「今日」：进度 / 列表 / 输入框
     TaskRowView.swift             # 单条：勾选完成 / 行内编辑 / 删除
@@ -116,8 +122,78 @@ ios/DailyPlan/
 - **埋点上报（reminder_set / trigger / complete 等）**：仅留调用点注释，未接通上报逻辑（规格 §6.5）。
 - **跨日后台常驻唤醒**：v1 不做（规格 §5）；超 7 天的远期提醒依赖用户再次打开 App 时补偿。
 
+## M3（F2 语音）iOS 完成项与未做项
+
+> 阶段：Stage 4 / Milestone M3（Task #48 M3-B，iOS 语音层）。依据 `设计规格_M3语音层.md`。
+
+### 已实现（M3 · iOS 语音层）
+- **`Speech/ASRController.swift`**：平台无关协议 `ASRController`（`requestPermission()` / `isAvailable` /
+  `start(onPartial:onFinal:)` / `stop()`）+ `PermissionState` + `VoiceDegradeReason`；iOS 实现
+  `NativeASRController` 基于 `SFSpeechRecognizer` + `AVAudioEngine` 持续听：`shouldReportPartialResults=true`、
+  `taskHint=.dictation`、`requiresOnDeviceRecognition=true` **离线优先**。
+- **离线优先 → 联网回退（P0-1）**：`requiresOnDeviceRecognition=true` 失败（离线包缺失）→ 重建
+  `requiresOnDeviceRecognition=false` 请求联网识别一次；联网仍失败 → 降级。音频仅发往 Apple 系统 ASR，
+  无账号/待办写回（§8 隐私）。
+- **长停顿边界**：`Speech/SilentPauseMonitor.swift` 由音频缓冲 RMS 检测静音，阈值取自
+  `config.splitPauseThresholdMs`（当前 1200），**禁止硬编码**（P0-4）；超阈值把当前缓冲作为一次 `onFinal` 边界
+  交给领域层切分落库。
+- **增量去重**：`onFinal` 仅提交 SFTranscription 的「新增 segments」，避免尾句/停顿导致重复落库（R-E2）。
+- **`Domain/VoiceTaskSplitter.swift`（领域层，双端同源）**：解析消费 `shared/asr_split_config.json`
+  （`splitPunctuation=[。！？；]`、`includeEnumerationComma=false`、`includeNewline=false`、`splitPauseThresholdMs=1200`）；
+  按标点切分、去尾标点、**不含「、」与换行**（由配置决定，不切）；每段非空 → `TaskRepository.add(source=.voice)`；
+  title 超 500 截断（R-X5）。**全程无拆分常量硬编码**。
+- **失败降级（§6）**：授权拒 / 无网无离线包 / 识别失败 → `onDegrade` 回调关语音按钮 + Toast「语音暂不可用，请改用文字输入」
+  （R-X1，文字录入仍可用）；提供「存为文字」把当前缓冲以 `source=.text` 落库（§6.2）。
+- **手动「落一条」优先（R-E2）**：听写中按钮直接把当前缓冲交 `commitFinalSegment`，并清空避免重复。
+- **接线（与 M1 并存）**：`DailyPlanApp` 启动时 `ASRSplitConfig.loadFromBundle()` 解析配置；`TodayTaskViewModel`
+  持有 `NativeASRController` + `VoiceTaskSplitter`，`onFinal → splitter.commitFinalSegment → repository.add`，
+  复用 `todayTasks()` 刷新；文字输入（F1）完全不受影响。
+
+### F2 语音输入 UI（M3-D，Task #50 · `Views/TodayView.swift`）
+- **麦克风按钮与文字输入并存**：顶部进度条右侧麦克风按钮（`mic.circle` / 录音中 `waveform.circle.fill`），
+  与底部 `TextField` 文字输入互不干扰；能力不可用 / 已降级时按钮置灰（`!voiceAvailable && !isVoiceActive`）。
+- **录音态视觉反馈**：听写中显示红点脉冲（`VoicePulsingDot` 呼吸式缩放+透明度）、`mm:ss` 计时（`Timer` 每秒累加）、
+  简易波形动画（`VoiceWaveform` 竖条起伏），均为纯视觉、不阻塞文字流。
+- **实时中间文本**：`onPartial` 经 `vm.voicePartialText` 实时显示于气泡（空时显示「聆听中…」），仅展示不落库。
+- **自动落一条**：`onFinal → splitter.commitFinalSegment` 按 JSON 标点切分并 `source=.voice` 落库后 `reload()` 刷新列表。
+- **手动「落一条」**：听写中按钮直接把当前缓冲交 `commitFinalSegment`（优先于自动信号，R-E2）。
+- **「存为文字」停止并保存**：降级/中途场景把当前缓冲以 `source=.text` 落库（§6.2）；为空不落（R-X4）。
+- **降级 UI**：`onDegrade` → 关麦克风按钮 + 底部 Toast「语音暂不可用，请改用文字输入」（轻点可关），文字录入仍可用（R-X1）。
+- **合并/拆分基础版（§7）**：`Domain/TaskMergeSplitUseCase.swift` 冻结 `merge`/`split` 接口，复用
+  `TaskRepository`（update/add/delete）落库，重启后保持；合并以「、」连接。
+- **不新增字段**：落库复用 `source=.voice`（M1 已预留），未改动数据层。
+
+### 需补充 / 未做（M3 · iOS）
+- **`Info.plist` 两个权限文案（§3.3）**：本工程为 code-first，无仓库内 Info.plist；需在 Xcode 工程加入
+  `NSSpeechRecognitionUsageDescription` 与 `NSMicrophoneUsageDescription`（文案含「语音经系统 ASR 在设备端或
+  联网转写，弱网/离线可能上传音频至 Apple，可在设置关闭语音输入」）。
+- **设置页语音开关 / 重授权入口（§8）**：仅预留 `voiceAvailable` 状态与 Toast 引导，设置页 UI 待 F-perm 阶段补齐。
+- **埋点调用点（`voice_start/voice_partial/voice_split/voice_stop/voice_error`）**：仅留注释，未接通上报（同 M2 口径）。
+- **长按合并/拆分 UI（AC-5）**：接口与基础版已实现，但列表长按手势入口未接（待确认项 5，建议 M3.1 补 UI）。
+- **真机语音质量 / 端到端拆分**：需真机验证（同 M1/M2 验收跟进项）。
+
 ## 与规格的偏差 / 待确认点
 - **Core Data 多对多建模**：iOS 采用原生 many-to-many 关系（`Task.tags`），Android Room 用显式 `task_tag` 关联表；
   两者语义等价，属双端存储差异的正常取舍（规格 §6 实体清单含 TaskTag，Room 侧已落表）。
 - **拖拽手势**：M1 列表排序通过「上移/下移」按钮驱动 `reorder`（持久化已验证），完整手指拖拽手势建议在 F4 阶段增强。
 - **模型形式**：采用 code-first 模型而非 `.xcdatamodeld`，便于源码直落仓库（见上「如何打开」）。
+
+## Info.plist 配置说明（M3 缺陷 D2 修复）
+
+已新增 `DailyPlan/Info.plist`（与 `DailyPlanApp.swift` 同层），补齐语音识别与麦克风权限文案，避免
+`NativeASRController` 在真机请求 `SFSpeechRecognizer.requestAuthorization` / `AVAudioEngine` 录音时因缺键崩溃（上线阻断项）。
+
+**已包含的权限键**
+
+| 键 | 用途 |
+| --- | --- |
+| `NSMicrophoneUsageDescription` | 每日计划需要使用麦克风以进行语音记录待办 |
+| `NSSpeechRecognitionUsageDescription` | 每日计划需要使用语音识别，将您的语音转为文字待办（可离线识别） |
+
+**最小宿主键**：`CFBundleName` / `CFBundleDisplayName`(`DailyPlan`) / `CFBundleIdentifier`(`com.dailyplan.app`) /
+`CFBundleVersion` / `CFBundleShortVersionString` / `CFBundlePackageType`(`APPL`) / `UILaunchScreen`(空字典)。
+
+> ⚠️ **必须在 Xcode 中挂到 target**：仅把 `Info.plist` 放进仓库不够。需在 Xcode 工程的
+> **Build Settings → Info.plist File** 指向 `DailyPlan/Info.plist`（如 `DailyPlan/Info.plist`），
+> 使其被纳入对应 target 的 Info 配置；否则真机运行仍会因缺键崩溃。本沙箱无 Xcode，无法编译验证，请在本机确认。
+> 未改动任何语音/识别逻辑，仅补配置。
