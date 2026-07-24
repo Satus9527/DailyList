@@ -81,6 +81,42 @@ android/
 - **F4 分类/优先级/标签完整 UI**：字段/结构/种子/归一已实现，但分类选择、优先级切换、标签联想输入界面暂缓。
 - **v1.1 云同步**：`syncState`/`updatedAt` 预埋，未消费，无账号/网络写路径。
 
+## M2（F3 提醒）Android 完成项与未做项
+
+> 阶段：M2（在 M1 数据层之上实现 Android 通知层）。依据 `设计规格_M2提醒排程.md` §4。
+
+### 已实现（M2 · Android 通知层）
+- **触发点生成**：`WorkManagerReminderScheduler.buildTriggerPoints` 按规格 §2.2 推导——`L>0→T-L`（提前）、`T`（到点）、`R>0→T+i×10分`（重复）。严格采用 P0-2 默认 10/3，单条经 `update` 覆盖；`L=0`/`R=0` 关闭对应点（AC-11）。
+- **调度**：每个触发点一个 `OneTimeWorkRequest`，`setInitialDelay` 到绝对触发时刻，`tag = taskId.toString()`；`schedule` 先 `cancelAllWorkByTag` 再登记，幂等（改期/取消完成安全）。
+- **触发时查 isDone（完整兜底）**：`ReminderWorker.doWork` 先 `repository.get(taskId)`，未完成才 `showReminder`，已完成直接结束（规格 §2.5 / §4.2），实现「到点已完成后续重复不响」。
+- **通知渠道**：`channel_reminder`（IMPORTANCE_HIGH + 声音/振动），在 `DailyPlanApplication.onCreate` 创建。
+- **通知交互**：`标记完成` / `推迟10分钟` 两个 Action → `ReminderActionReceiver` 广播：`complete→markDone+cancel`（AC-9），`snooze→snooze`（清旧建新，规格 §2.4）；点击通知跳转 App。
+- **DND 处理**：`DndPolicyHelper` 检测 `ACCESS_NOTIFICATION_POLICY` 授权；仅授权时 `setBypassDnd(true)`，未授权仅栏显不响铃；首次未授权经 `maybeRequestDndPolicy` 引导至系统设置（SharedPreferences 去重）。`POST_NOTIFICATIONS` 在 `MainActivity` 运行时申请（API 33+）。
+- **启动/重启补偿**：`rescheduleAllPending()` 扫 `tasksWithPendingReminders(now, now+7天)` 重建；由 `MainActivity.onResume`（前台）、`BootReceiver`（重启）触发，补偿 Doze/重启丢失。WorkManager 自身持久化已跨重启，此为二次修复。
+- **接线**：`AppContainer` 注入 `WorkManagerReminderScheduler` 到 `TodayViewModel`；标记完成 `cancel`、取消完成 `schedule` 恢复、删除 `cancel`；`AndroidManifest` 加三权限 + 两 Receiver。
+- **M1 复用**：未新增 Task 字段、未建独立 Reminder 表；新增 `TaskRepository.get(id)`（触发时查 isDone 用）。
+- **异常兜底**：调度/取消/补偿均 `runCatching`，绝不致 App 崩溃（P0-3）。
+- **F3 提醒设置 UI（M2-D，Task #36）**：
+  - 新增 `ui/screen/ReminderSettingSheet.kt`：以 `ModalBottomSheet` 承载的提醒设置面板。提供「启用提醒」开关；
+    启用时可选 `remindAt`（DatePickerDialog + TimePicker，默认今天 09:00）、`leadMinutes`（FilterChip 5/10/15/30 分，
+    默认 10；关闭开关即 L=0）、`repeatCount`（FilterChip 1/2/3/5 次，默认 3；关闭开关即 R=0，AC-11）。
+  - `ui/screen/TaskItem.kt`：每条待办加铃铛入口（`onSetReminder`），已设提醒时显示下次提醒时间（`MM/dd HH:mm`）且铃铛高亮。
+  - `ui/screen/TodayScreen.kt`：持有 `reminderTask` 状态，以 `ModalBottomSheet` 弹出 `ReminderSettingSheet`，
+    保存回调调 `viewModel.saveReminder(...)`。
+  - `ui/viewmodel/TodayViewModel.kt`：新增 `saveReminder(taskId, remindAt, leadMinutes, repeatCount)`——
+    先 `repository.update` 持久化新值，再据新值排程；编辑 `remindAt` 由 `reminderScheduler.schedule`
+    内部先 `cancelAllWorkByTag` 再登记（幂等，AC-28 / R-E11）；`remindAt=null` 则 `cancel`。
+  - 完成/删除的自动取消已就绪（`toggleDone`/`delete` 均调 `cancel`），与 UI 改动无冲突；500 字上限等 M1 规则不受影响。
+
+### 刻意未做 / 需确认（M2）
+- **iOS 端实现**：本任务仅 Android；iOS `NativeReminderScheduler` 不在范围内。
+- **跨日强唤醒**：v1 不做后台常驻；超出 7 天窗口且多日不开 App 的远期提醒可能不达（规格 §5.3），由 App 内列表兜底。
+- **需架构/测试确认**：
+  1. `RescheduleAllPending` 用 `runBlocking` 一次性扫全窗口，数据量大时（理论上限低）可接受，建议真机验证前台补偿耗时。
+  2. `ReminderWorker` 经 `DailyPlanApplication.container` 取依赖（手动 DI），需确认 WorkManager 在极低内存被杀重建时 `container` 懒加载时序安全。
+  3. 通知 Action 的 `markDone` 经 Receiver 写入，未主动刷新 Compose 列表（依赖下次 `onResume` 的 `reload`）；如需实时刷新，建议 `todayTasks` 改为 `Flow` 持续观察。
+  4. 端到端触发（Doze/重启/DND/时区切换）需真机验证（同 M1 验收跟进项 7/8）。
+
 ## 与规格的偏差 / 待确认点
 - **Room 多对多**：Android 用显式 `task_tag` 关联表（规格 §7.2）；iOS 用原生 many-to-many，两者语义等价。
 - **拖拽手势**：M1 排序通过「上移/下移」按钮驱动 `reorder`（持久化已验证），完整手指拖拽建议 F4 阶段增强。

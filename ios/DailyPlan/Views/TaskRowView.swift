@@ -9,6 +9,8 @@ struct TaskRowView: View {
     let onToggleDone: (TaskDTO) -> Void
     let onCommitEdit: (TaskDTO, String) -> Void
     let onDelete: (TaskDTO) -> Void
+    /// F3 提醒设置入口（M2-D，Task #36）：点击铃铛打开提醒面板
+    let onSetReminder: (TaskDTO) -> Void
 
     @State private var editText: String = ""
 
@@ -30,6 +32,24 @@ struct TaskRowView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .onTapGesture { beginEdit() }
             }
+
+            // F3 提醒入口：铃铛 + 下次提醒时间（无提醒显示「无提醒」）
+            Button(action: { onSetReminder(task) }) {
+                HStack(spacing: 4) {
+                    Image(systemName: task.remindAt == nil ? "bell.slash" : "bell")
+                        .foregroundColor(task.remindAt == nil ? .secondary : .accentColor)
+                    if let ra = task.reminderShortText {
+                        Text(ra)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("无提醒")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .buttonStyle(.borderless)
 
             // 删除
             Button(action: { onDelete(task) }) {

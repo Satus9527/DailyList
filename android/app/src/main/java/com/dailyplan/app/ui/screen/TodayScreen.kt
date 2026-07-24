@@ -17,14 +17,19 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.dailyplan.app.domain.model.Task
 import com.dailyplan.app.ui.viewmodel.TodayViewModel
 
 @Composable
@@ -32,6 +37,9 @@ fun TodayScreen(viewModel: TodayViewModel) {
     val tasks by viewModel.tasks.collectAsStateWithLifecycle()
     val input by viewModel.inputText.collectAsStateWithLifecycle()
     val error by viewModel.errorMessage.collectAsStateWithLifecycle()
+
+    // F3 提醒设置面板所针对的待办（null 表示未打开，M2-D）
+    var reminderTask: Task? by remember { mutableStateOf(null) }
 
     // 错误提示（截断/失败）短暂展示
     LaunchedEffect(error) {
@@ -60,6 +68,7 @@ fun TodayScreen(viewModel: TodayViewModel) {
                     onToggleDone = viewModel::toggleDone,
                     onEditCommit = viewModel::editTitle,
                     onDelete = viewModel::delete,
+                    onSetReminder = { reminderTask = it },
                     onMoveUp = if (index > 0) {
                         { viewModel.reorder(index, index - 1) }
                     } else null,
@@ -83,6 +92,17 @@ fun TodayScreen(viewModel: TodayViewModel) {
                         Icon(Icons.Filled.Add, contentDescription = "添加")
                     }
                 }
+            )
+        }
+    }
+
+    // F3 提醒设置面板（M2-D，Task #36）：ModalBottomSheet 承载设置内容
+    reminderTask?.let { task ->
+        ModalBottomSheet(onDismissRequest = { reminderTask = null }) {
+            ReminderSettingSheet(
+                task = task,
+                viewModel = viewModel,
+                onDismiss = { reminderTask = null }
             )
         }
     }

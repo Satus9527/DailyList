@@ -5,6 +5,7 @@
 package com.dailyplan.app
 
 import android.app.Application
+import com.dailyplan.app.data.reminder.ReminderNotificationHelper
 import com.dailyplan.app.di.AppContainer
 
 class DailyPlanApplication : Application() {
@@ -14,5 +15,7 @@ class DailyPlanApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container.seedPresetCategoriesIfNeeded()
+        // 创建提醒通知渠道 channel_reminder（规格 §4.3，仅需一次）
+        container.reminderNotificationHelper.ensureChannel()
     }
 }

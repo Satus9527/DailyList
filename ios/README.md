@@ -70,6 +70,52 @@ ios/DailyPlan/
 - **F4 分类/优先级/标签完整 UI**：字段/结构/种子/归一已实现，但分类选择、优先级切换、标签联想输入的完整界面暂缓。
 - **v1.1 云同步**：`syncState`/`updatedAt` 字段预埋，但未消费，无账号/网络写路径。
 
+## M2（F3 提醒）iOS 完成项与未做项
+
+> 阶段：Stage 4 / Milestone M2（Task #34 M2-B，iOS 通知层）。依据 `设计规格_M2提醒排程.md`。
+
+### 已实现（M2 · iOS 通知层）
+- **通知层文件**：`DailyPlan/Notifications/ReminderScheduler.swift`，含 `TriggerKind` / `TriggerPoint` /
+  `ReminderScheduler` 协议 + `NativeReminderScheduler`（基于 `UNUserNotificationCenter`）。
+- **触发点生成规则（规格 §2）**：`leadMinutes>0` 生成 `__lead`（T−leadMinutes）；总是生成 `__at`（T）；
+  `repeatCount>0` 生成 `__rep{i}`（T+i×10min，i=1..R）。默认随 `TaskDTO`（P0-2：10/3），单条可覆盖；
+  未设 `remindAt` 不排程。每个点用 `UNCalendarNotificationTrigger`（绝对本地时间）登记，`identifier`
+  以 `task.id.uuidString` 为前缀。
+- **schedule / cancel / snooze**：`schedule` 先 `cancel` 再登记（幂等，改期不重复）；`cancel` 移除该
+  task 全部前缀 pending（含 `__lead/__at/__snooze/__rep{1..3}`）；`snooze` 单实例 `__snooze`（T+10min，幂等覆盖）。
+- **启动 / 前台补偿**：`rescheduleAllPending()` 扫 `now+7天`（`tasksWithPendingReminders`），对每个未完成任务
+  幂等重建；在 App 冷/热启动（`DailyPlanApp.init`）与进入前台（`scenePhase == .active`）调用。
+- **通知交互**：注册 `UNNotificationCategory`（「标记完成」`action_complete` / 「推迟10分钟」`action_snooze`）；
+  `NativeReminderScheduler` 作为 `UNUserNotificationCenterDelegate` 处理 `didReceive`：点「标记完成」→
+  `completeTask`（markDone + cancel）；「推迟」→ `snooze`。
+- **完成即取消（AC-9 / R-E7）**：`TodayTaskViewModel.toggleDone` 标记完成时调 `scheduler.cancel`；通知 Action
+  亦经 `completeTask` 联动取消；取消完成时若仍有未来提醒则 `schedule` 恢复（AC-26）。
+- **授权降级（P0-3 精神）**：未授权（`denied`）时 `schedule` 跳过并记日志、不崩溃；首次启动 `notDetermined`
+  时请求授权；授权请求/排程/补偿全程异常捕获、绝不崩溃。
+- **不改 M1 数据层**：复用 `remindAt`/`leadMinutes`/`repeatCount` 与 `tasksWithPendingReminders`，未新增字段、
+  未建独立 Reminder 表。ViewModel 预留 `applyReminderSetting(for:)` 供 F4 编辑/改期 UI 接线（AC-28）。
+- **F3 提醒设置 UI（M2-D，Task #36）**：
+  - 新增 `Views/ReminderSettingView.swift`：提醒设置面板（`.sheet` 呈现）。提供「启用提醒」开关；
+    启用时可选 `remindAt`（DatePicker，含日期+时分，默认今天 09:00）、`leadMinutes`（分段选择器 5/10/15/30 分，
+    默认 10；关闭开关即 L=0）、`repeatCount`（分段选择器 1/2/3/5 次，默认 3；关闭开关即 R=0，AC-11）。
+  - `Views/TaskRowView.swift`：每条待办加铃铛入口（`onSetReminder`），并显示下次提醒时间（`M/d HH:mm`）；
+    无提醒显示「无提醒」、铃铛置灰。
+  - `Views/TodayView.swift`：持有 `reminderTask` 状态，以 `.sheet(item:)` 弹出 `ReminderSettingView`，
+    保存回调调 `vm.saveReminder(...)`。
+  - `ViewModels/TodayTaskViewModel.swift`：新增 `saveReminder(taskId:remindAt:leadMinutes:repeatCount:)`——
+    先更新领域模型并 `repository.update` 持久化，再据新值排程；编辑 `remindAt` 由 `scheduler.schedule`
+    内部先 cancel 再登记（幂等，AC-28 / R-E11）；`remindAt=nil` 或时间已过则 `scheduler.cancel`。
+  - 完成/删除的自动取消已就绪（`toggleDone`/`delete` 均调 `scheduler.cancel`），与 UI 改动无冲突；500 字上限等 M1 规则不受影响。
+
+### 刻意未做 / 待确认（M2 · iOS）
+- **iOS 触发时刻查 isDone**：系统级 pending 通知无法在触发瞬间被 App 条件性抑制（规格 §2.5）。iOS 等价保证来自
+  「完成即 cancel + 幂等 Action + App 内列表兜底」，属平台边界，不阻塞上线；与 Android 的 `doWork` 运行时查
+  `isDone` 完整兜底存在能力差异，需架构/测试确认口径。
+- **首页「错过的提醒」区（R-X3 / AC-10）与「提醒可能不送达」常驻提示（R-S4 / AC-20）**：仅留 `requestAuthorizationIfNeeded`
+  打点，UI 区与提示文案尚未实现（属 F-perm / 首页增强，建议后续里程碑补齐）。
+- **埋点上报（reminder_set / trigger / complete 等）**：仅留调用点注释，未接通上报逻辑（规格 §6.5）。
+- **跨日后台常驻唤醒**：v1 不做（规格 §5）；超 7 天的远期提醒依赖用户再次打开 App 时补偿。
+
 ## 与规格的偏差 / 待确认点
 - **Core Data 多对多建模**：iOS 采用原生 many-to-many 关系（`Task.tags`），Android Room 用显式 `task_tag` 关联表；
   两者语义等价，属双端存储差异的正常取舍（规格 §6 实体清单含 TaskTag，Room 侧已落表）。

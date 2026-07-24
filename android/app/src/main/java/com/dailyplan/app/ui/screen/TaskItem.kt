@@ -16,8 +16,10 @@ import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,6 +33,9 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import com.dailyplan.app.domain.model.Task
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun TaskItem(
@@ -38,6 +43,7 @@ fun TaskItem(
     onToggleDone: (Task) -> Unit,
     onEditCommit: (Task, String) -> Unit,
     onDelete: (Task) -> Unit,
+    onSetReminder: (Task) -> Unit,
     onMoveUp: (() -> Unit)? = null,
     onMoveDown: (() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -103,6 +109,23 @@ fun TaskItem(
                     .padding(start = 4.dp)
             )
         } else {
+            // F3 提醒入口（铃铛 + 下次提醒时间）
+            IconButton(onClick = { onSetReminder(task) }) {
+                Icon(
+                    imageVector = Icons.Filled.Notifications,
+                    contentDescription = "提醒设置",
+                    tint = if (task.remindAt != null) MaterialTheme.colorScheme.primary else Color.Gray
+                )
+            }
+            if (task.remindAt != null) {
+                Text(
+                    formatRemindTime(task.remindAt),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.padding(end = 4.dp)
+                )
+            }
+
             // 删除
             IconButton(onClick = { onDelete(task) }) {
                 Icon(Icons.Filled.Delete, contentDescription = "删除", tint = Color.Red)
@@ -116,4 +139,11 @@ fun TaskItem(
             }
         }
     }
+}
+
+/** 行内展示用：压缩的提醒时间（MM/dd HH:mm，设备本地时区） */
+private fun formatRemindTime(date: Date): String {
+    val fmt = SimpleDateFormat("MM/dd HH:mm", Locale.US)
+    fmt.timeZone = java.util.TimeZone.getDefault()   // 设备本地时区（规格 §1.1）
+    return fmt.format(date)
 }

@@ -2,6 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- 通知权限：Android 13+ 必需（规格 §4.5） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 绕过勿扰（DND）授权，setBypassDnd 需要（规格 §4.5） -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+    <!-- 重启后由 BootReceiver 触发二次补偿（规格 §4.4 / §5） -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:name=".DailyPlanApplication"
         android:allowBackup="true"
@@ -20,6 +27,26 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 通知 Action 广播：标记完成 / 推迟10分钟（规格 §4.3） -->
+        <receiver
+            android:name=".data.reminder.ReminderActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.dailyplan.app.action.REMINDER_COMPLETE" />
+                <action android:name="com.dailyplan.app.action.REMINDER_SNOOZE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 重启补偿接收器（规格 §4.4 / §5） -->
+        <receiver
+            android:name=".data.reminder.BootReceiver"
+            android:exported="false"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

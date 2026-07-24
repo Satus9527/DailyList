@@ -43,6 +43,10 @@ interface TaskDao {
     @Query("DELETE FROM task WHERE id = :id")
     suspend fun deleteById(id: String)
 
+    // F3：按 id 读取单条（规格 §4.2 触发时查 isDone）
+    @Query("SELECT * FROM task WHERE id = :id")
+    suspend fun getById(id: String): TaskEntity?
+
     // F5：拖拽重排（@Transaction 保证原子，规格 §5.1 / §7.3）
     @Transaction
     suspend fun reorder(orders: List<IdOrder>) {

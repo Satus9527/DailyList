@@ -84,6 +84,9 @@ dependencies {
     // 协程
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
+    // WorkManager（F3 提醒可靠调度，规格 §5.3 / §4.1）
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
+
     // 序列化（ASR 配置解析，规格 §8）
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
 }

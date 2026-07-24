@@ -9,11 +9,17 @@ struct TodayView: View {
     @StateObject private var vm: TodayTaskViewModel
 
     @State private var editingId: UUID?
+    /// F3 提醒设置面板所针对的待办（nil 表示未打开）
+    @State private var reminderTask: TaskDTO?
 
-    init() {
-        // 在 View 初始化时无法访问 Environment，故用默认 context 的 fallback 构造；
-        // 实际运行由 DailyPlanApp 注入 managedObjectContext。
-        _vm = StateObject(wrappedValue: TodayTaskViewModel(context: PersistenceController.shared.viewContext))
+    /// scheduler 由 DailyPlanApp 注入（F3，M2）；context 沿用 PersistenceController 共享栈。
+    init(scheduler: ReminderScheduler) {
+        _vm = StateObject(
+            wrappedValue: TodayTaskViewModel(
+                context: PersistenceController.shared.viewContext,
+                scheduler: scheduler
+            )
+        )
     }
 
     var body: some View {
@@ -43,7 +49,8 @@ struct TodayView: View {
                             isEditing: $editingId,
                             onToggleDone: { vm.toggleDone($0) },
                             onCommitEdit: { vm.editTitle($0, to: $1) },
-                            onDelete: { vm.delete($0) }
+                            onDelete: { vm.delete($0) },
+                            onSetReminder: { reminderTask = $0 }
                         )
                     }
                     .onMove { from, to in
@@ -65,6 +72,16 @@ struct TodayView: View {
                 .padding()
             }
             .navigationTitle("今日计划")
+        }
+        // F3 提醒设置面板（M2-D，Task #36）：保存经 VM 持久化并排程
+        .sheet(item: $reminderTask) { task in
+            ReminderSettingView(
+                task: task,
+                onDismiss: { reminderTask = nil },
+                onSave: { ra, lm, rc in
+                    vm.saveReminder(taskId: task.id, remindAt: ra, leadMinutes: lm, repeatCount: rc)
+                }
+            )
         }
     }
 }

@@ -23,6 +23,9 @@ interface TaskRepository {
     /** 删除一条（级联删 Tag 关联） */
     suspend fun delete(id: UUID)
 
+    /** 按 id 读取单条（F3 触发时查 isDone 用，规格 §4.2；未找到返回 null） */
+    suspend fun get(id: UUID): Task?
+
     /** 重排：ids 顺序即新 sortOrder（规格 §5.1） */
     suspend fun reorder(ids: List<UUID>)
 

@@ -20,9 +20,13 @@ final class TodayTaskViewModel: ObservableObject {
     private let repository: TaskRepository
     private let context: NSManagedObjectContext
 
-    init(context: NSManagedObjectContext) {
+    /// 通知调度器（F3，M2）：完成即取消、取消完成恢复、设/改提醒排程均经此。
+    private let scheduler: ReminderScheduler
+
+    init(context: NSManagedObjectContext, scheduler: ReminderScheduler) {
         self.context = context
         self.repository = LocalTaskRepository(context: context)
+        self.scheduler = scheduler
         reload()
     }
 
@@ -55,6 +59,10 @@ final class TodayTaskViewModel: ObservableObject {
         do {
             try repository.add(task)
             inputText = ""        // 清空输入框（AC-1）
+            // F3 接线点：新增时若已带提醒（未来时刻），自动排程（当前输入框未设提醒，为预留接线）
+            if let ra = task.remindAt, ra > Date() {
+                scheduler.schedule(for: task)
+            }
             reload()
         } catch {
             errorMessage = "添加失败：\(error.localizedDescription)"
@@ -70,9 +78,15 @@ final class TodayTaskViewModel: ObservableObject {
                 updated.isDone = false
                 updated.doneAt = nil
                 try repository.update(updated)
+                // AC-26：取消完成时若仍有未触发提醒，恢复其排程（提前/到点/重复）
+                if let ra = updated.remindAt, ra > Date() {
+                    scheduler.schedule(for: updated)
+                }
             } else {
                 // 标记完成（AC-14）
                 try repository.markDone(task.id, at: Date())
+                // AC-9（R-E7）：完成即取消该任务所有未触发后续提醒（避免已完成还响）
+                scheduler.cancel(for: task.id)
             }
             reload()
         } catch {
@@ -99,9 +113,47 @@ final class TodayTaskViewModel: ObservableObject {
     func delete(_ task: TaskDTO) {
         do {
             try repository.delete(task.id)
+            // 删除待办时一并取消其提醒（避免残留通知指向已删任务）
+            scheduler.cancel(for: task.id)
             reload()
         } catch {
             errorMessage = "删除失败：\(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - F3 提醒接线点（供 F4 编辑/改期 UI 调用）
+    /// 设置或改期提醒（AC-28 / R-E11）：schedule 内含 cancel，按新 T 幂等重建，不重复通知。
+    /// 若 remindAt 为空或已过去，则取消该任务全部提醒。
+    func applyReminderSetting(for task: TaskDTO) {
+        if let ra = task.remindAt, ra > Date() {
+            scheduler.schedule(for: task)
+        } else {
+            scheduler.cancel(for: task.id)
+        }
+    }
+
+    // MARK: - F3 提醒设置（UI 调用，M2-D，Task #36）
+    /// 为单条待办设置/修改提醒：先更新领域模型（remindAt / leadMinutes / repeatCount），
+    /// 再 repository.update 持久化；随后据新值排程。
+    /// - 编辑 remindAt 时由 `scheduler.schedule` 内部先 `cancel` 再登记（幂等，改期不重复，AC-28 / R-E11）。
+    /// - remindAt=nil（关闭提醒）或时间已过期 → `scheduler.cancel` 移除该任务全部 pending。
+    func saveReminder(taskId: UUID, remindAt: Date?, leadMinutes: Int, repeatCount: Int) {
+        guard let idx = tasks.firstIndex(where: { $0.id == taskId }) else { return }
+        var task = tasks[idx]
+        task.remindAt = remindAt
+        task.leadMinutes = leadMinutes
+        task.repeatCount = repeatCount
+        task.updatedAt = Date()
+        do {
+            try repository.update(task)
+            if let ra = remindAt, ra > Date() {
+                scheduler.schedule(for: task)
+            } else {
+                scheduler.cancel(for: task.id)
+            }
+            reload()
+        } catch {
+            errorMessage = "保存提醒失败：\(error.localizedDescription)"
         }
     }
 

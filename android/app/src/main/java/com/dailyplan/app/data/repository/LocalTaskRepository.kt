@@ -39,6 +39,9 @@ class LocalTaskRepository(private val db: AppDatabase) : TaskRepository {
         dao.deleteById(id.toString())
     }
 
+    override suspend fun get(id: UUID): Task? =
+        dao.getById(id.toString())?.toDomain()   // 未找到返回 null（规格 §4.2）
+
     override suspend fun reorder(ids: List<UUID>) {
         // 单事务提交整组重排（@Transaction，规格 §7.3）
         val orders = ids.mapIndexed { index, id -> IdOrder(id.toString(), index) }
