@@ -38,9 +38,17 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -67,8 +75,14 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.input.ImeAction
 import androidx.core.content.ContextCompat
+import java.util.UUID
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.dailyplan.app.data.local.CategoryEntity
+import com.dailyplan.app.data.local.TagEntity
+import com.dailyplan.app.domain.model.Priority
 import com.dailyplan.app.domain.model.Task
+import com.dailyplan.app.domain.model.TaskFilter
+import com.dailyplan.app.domain.model.displayName
 import com.dailyplan.app.data.voice.VoiceState
 import com.dailyplan.app.ui.viewmodel.TodayViewModel
 
@@ -83,6 +97,10 @@ fun TodayScreen(viewModel: TodayViewModel) {
     val inProgress by viewModel.inProgressTasks.collectAsStateWithLifecycle()
     val done by viewModel.doneTasks.collectAsStateWithLifecycle()
     val banner by viewModel.notificationBanner.collectAsStateWithLifecycle()
+    // M5 F4 筛选栏状态（分类/优先级/标签，单维+组合 AND）
+    val filter by viewModel.filter.collectAsStateWithLifecycle()
+    val categories by viewModel.categories.collectAsStateWithLifecycle()
+    val allTags by viewModel.allTags.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     // M3 运行时申请 RECORD_AUDIO（规格 §4.4）；拒绝 → 降级引导文字
@@ -163,6 +181,14 @@ fun TodayScreen(viewModel: TodayViewModel) {
                     onClick = { viewModel.openNotificationSettings(context) }
                 )
             }
+
+            // M5 F4 筛选栏（置于 D4 横幅下、列表上；单维/组合 AND，清除=全部，规格 §4.2 / §4.3）
+            FilterBar(
+                filter = filter,
+                categories = categories,
+                allTags = allTags,
+                onFilterChange = viewModel::applyFilter
+            )
 
             // D3「错过的提醒」区（规格 §1.3，置于列表上方、空态不渲染）
             if (missed.isNotEmpty()) {
@@ -322,6 +348,108 @@ fun TodayScreen(viewModel: TodayViewModel) {
 }
 
 // MARK: - D3 / 分区 小组件
+
+/**
+ * M5 F4 首页筛选栏（规格 §4.2 / §4.3）：分类 / 优先级 / 标签 三个入口，支持单维与组合（AND）。
+ * 空条件 = 全部。筛选对各区块（错过的提醒/进行中/已完成）统一生效（由各区块派生时叠加）。
+ */
+@Composable
+private fun FilterBar(
+    filter: TaskFilter,
+    categories: List<CategoryEntity>,
+    allTags: List<TagEntity>,
+    onFilterChange: (TaskFilter) -> Unit
+) {
+    var catExpanded by remember { mutableStateOf(false) }
+    var tagExpanded by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 分类筛选
+        Box {
+            FilterChip(
+                selected = filter.categoryId != null,
+                onClick = { catExpanded = true },
+                label = { Text("分类") },
+                trailingIcon = { Icon(Icons.Filled.ArrowDropDown, contentDescription = null) }
+            )
+            DropdownMenu(expanded = catExpanded, onDismissRequest = { catExpanded = false }) {
+                DropdownMenuItem(text = { Text("全部") }, onClick = {
+                    onFilterChange(filter.copy(categoryId = null)); catExpanded = false
+                })
+                categories.forEach { cat ->
+                    DropdownMenuItem(
+                        text = { Text(cat.name) },
+                        onClick = {
+                            onFilterChange(filter.copy(categoryId = UUID.fromString(cat.id)))
+                            catExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+
+        // 优先级筛选（单维切换，再次点击清除）
+        Priority.entries.forEach { p ->
+            FilterChip(
+                selected = filter.priority == p,
+                onClick = {
+                    onFilterChange(filter.copy(priority = if (filter.priority == p) null else p))
+                },
+                label = { Text(p.displayName) }
+            )
+        }
+
+        // 标签筛选（多选 AND）+ 仅无标签
+        Box {
+            FilterChip(
+                selected = filter.tagIds.isNotEmpty() || filter.untaggedOnly,
+                onClick = { tagExpanded = true },
+                label = { Text("标签") },
+                trailingIcon = { Icon(Icons.Filled.ArrowDropDown, contentDescription = null) }
+            )
+            DropdownMenu(expanded = tagExpanded, onDismissRequest = { tagExpanded = false }) {
+                DropdownMenuItem(
+                    text = { Text("仅无标签") },
+                    onClick = {
+                        onFilterChange(filter.copy(untaggedOnly = !filter.untaggedOnly, tagIds = emptySet()))
+                    }
+                )
+                HorizontalDivider()
+                if (allTags.isEmpty()) {
+                    DropdownMenuItem(text = { Text("暂无标签") }, onClick = { tagExpanded = false })
+                }
+                allTags.forEach { tag ->
+                    val checked = tag.id.let { id -> filter.tagIds.any { it.toString() == id } }
+                    DropdownMenuItem(
+                        text = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                androidx.compose.material3.Checkbox(
+                                    checked = checked,
+                                    onCheckedChange = {}
+                                )
+                                Text(tag.name)
+                            }
+                        },
+                        onClick = {
+                            val id = UUID.fromString(tag.id)
+                            val next = if (checked) filter.tagIds - id else filter.tagIds + id
+                            onFilterChange(filter.copy(tagIds = next, untaggedOnly = false))
+                        }
+                    )
+                }
+            }
+        }
+
+        // 清除筛选（恢复全部，规格 §6 空条件=全部）
+        if (!filter.isEmpty) {
+            TextButton(onClick = { onFilterChange(TaskFilter()) }) { Text("清除") }
+        }
+    }
+}
 
 /** D3「错过的提醒」区标题（带计数，规格 §1.3） */
 @Composable

@@ -228,3 +228,42 @@ android/
 - **拖拽手势**：M1 排序通过「上移/下移」按钮驱动 `reorder`（持久化已验证），完整手指拖拽建议 F4 阶段增强。
 - **Gradle Wrapper**：未提交 `gradlew`，由 Android Studio / 本地 Gradle 处理（见上「如何打开」）。
 - **exportSchema=true**：已配置 `ksp arg room.schemaLocation`，schema 将生成于 `app/schemas/`（规格 §9 迁移准备）。
+
+---
+
+## M5 组织能力（F4 分类 / 优先级 / 标签）
+
+> 基于 M1 已落地模型**扩展**，不重定义 `Category`/`Tag`/`Priority`/`TaskTagCrossRef` 与任何 `Task` 列（规格 §0 / §6 约束）。
+> 严格对齐 `设计规格_M5组织能力.md`，覆盖 AC-12 / AC-13 / AC-30①②③④ 与 R-O1 / R-O2。
+
+### 数据层新增（筛选 + 标签读写）
+- `TaskRepository` 接口（M5 §3.2）新增：
+  - `filteredTasks(date, filter: TaskFilter)` —— 组合筛选（分类+优先级+标签 AND；空条件=全部）
+  - `tasksByCategory(categoryId, date)` / `tasksByPriority(priority, date)` / `tasksByTags(tagIds, date)` —— 单维便捷
+  - `suggestTags(prefix, limit)` —— 标签联想补全（前缀先归一）
+  - `tagsForTask(id)` / `setTags(taskId, tagIds)` —— 经 `task_tag` 联表读取 / 整体替换标签关联
+  - `taskTagIds()` —— 批量读取 `taskId → 标签 id 集合` 映射（首页内存筛选用）
+- `dao/TaskDao.kt` 新增：组合查询 `tasksByDateCategoryPriority`（分类含「其他=nil」语义、优先级可空）、`allCrossRefs`、`tagsForTask`（JOIN）、`suggestTags`（LIKE 归一前缀）、`setTags`（`@Transaction` 先删后插）。
+- `LocalTaskRepository` 实现上述方法；标签筛选 AND 语义与 `untaggedOnly` 在内存层用 `TaskFilter.matches`（规格 §3.4）判定。
+
+### 标签归一 / 去重（AC-30③ / R-O1）
+- 归一函数集中至 `util/TagNormalizer.kt`（去首尾空格 → 全角转半角 → 小写），并补全 **U+3000 全角空格 → 半角空格** 分支以与 iOS 完全等价（规格 §5.1）。
+- 写入与查询均经 `TagNormalizer.normalize`；`TagRepository.addOrReuse` 仍负责按归一名去重复用同一 `Tag` 行——**标签读取/写入复用既有 `TagRepository` 去重，未另起炉灶**。
+- 编辑页保存时对每个标签调 `addOrReuse` 得到 `Tag.id`，收集为集合后调 `setTags` 整体替换（规格 §2.4 / §4.1）。
+
+### 编辑页扩展（与 M4 提醒设置同 sheet，规格 §4.1 / §4.3）
+- `ui/screen/ReminderSettingSheet.kt` 同 `ModalBottomSheet` 内新增三段，不另起新页：
+  - **分类选择器**：4 预设 + 自建入口（`CategoryRepository.add`）；默认「其他」预设 `OTHER_ID`。
+  - **优先级选择器**：高/中/低，默认「中」；列表行不强制展示标识。
+  - **标签输入**：实时 `suggestTags` 联想 + 回车/逗号确认 + 归一去重 + 可删 chip；非必填可跳过。
+- 保存改调 `TodayViewModel.saveTaskAll(...)`，一次性写 分类/优先级/标签（经 `setTags`）+ 提醒并重新排程。
+
+### 首页筛选栏（规格 §4.2）
+- `TodayScreen` 在 D4 常驻横幅**下**、D3 错过区**上**新增 `FilterBar`（横向滚动）：分类 / 优先级 / 标签（多选 AND）+ 仅无标签 + 清除（=恢复全部）。
+- 筛选作用于 `TodayViewModel` 已加载的展示日集合，对「错过的提醒 / 进行中 / 已完成」三区块统一生效（内存过滤，零额外查询；规格 §3.4 推荐路径）。
+- 与 M1–M4 既有 F1/F2/F3/F5/F6、D3/D4/S5 共存不冲突。
+
+### 接线与新增/修改文件
+- 新增：`domain/model/TaskFilter.kt`（`TaskFilter` + `matches`）、`util/TagNormalizer.kt`。
+- 修改：`data/repository/TaskRepository.kt`、`LocalTaskRepository.kt`、`dao/TaskDao.kt`、`TagRepository.kt`（改引 `util.TagNormalizer`）、`Enums.kt`（新增 `Priority.displayName`）、`ui/viewmodel/TodayViewModel.kt`（filter/categories/allTags 状态 + `applyFilter`/`saveTaskAll`/`addCategory`/`suggestTags`/`tagsForTask`/`addTagFromInput`，构造器注入 `categoryRepository`/`tagRepository`）、`ui/screen/ReminderSettingSheet.kt`、`ui/screen/TodayScreen.kt`（FilterBar）、`di/AppContainer.kt`（注入 `categoryRepository`/`tagRepository`）。
+- 刻意未做：iOS 端、F7/F8/F9（v1.1）。真机验证聚焦标签归一一致性与筛选 AND 语义（同 M1–M4 验收跟进项）。

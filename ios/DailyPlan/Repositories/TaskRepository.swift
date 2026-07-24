@@ -30,4 +30,25 @@ protocol TaskRepository {
     /// 不新增 Task 字段；调用方再按 `TaskDTO.displayDay` 二次过滤归并到「当日列表」。
     /// - Parameter day: 本地时区 "yyyy-MM-dd" 展示日。
     func tasksForDisplayDay(_ day: String) throws -> [TaskDTO]
+
+    // MARK: - M5 F4 筛选 / 标签读写（规格 §3.2）
+
+    /// 组合筛选：分类 + 优先级 + 标签（AND 语义）；作用于展示日 `date`（默认当日）。
+    /// 空条件（filter.isEmpty）= 返回该日全部（§6）。
+    func filteredTasks(on date: String, filter: TaskFilter) throws -> [TaskDTO]
+
+    /// 单维便捷：按分类（传「其他」预设 id 时含 categoryId == nil 的任务，见 §6）
+    func tasksByCategory(_ categoryId: UUID, on date: String) throws -> [TaskDTO]
+    /// 单维便捷：按优先级
+    func tasksByPriority(_ priority: Priority, on date: String) throws -> [TaskDTO]
+    /// 单维便捷：按标签（AND 多个）
+    func tasksByTags(_ tagIds: Set<UUID>, on date: String) throws -> [TaskDTO]
+
+    /// 标签联想补全：返回 name 以归一后前缀开头的已有标签（上限 limit，规格 §3.3 / §5）
+    func suggestTags(prefix: String, limit: Int) throws -> [TagDTO]
+
+    /// 读取某任务标签（§2.4 新增，复用 M1 TaskTagCrossRef 关联）
+    func tags(forTaskId id: UUID) throws -> [TagDTO]
+    /// 整体替换某任务标签关联（§2.4 新增；传入 tagIds 集合，先清空旧关联再建立新关联）
+    func setTags(taskId: UUID, tagIds: Set<UUID>) throws
 }

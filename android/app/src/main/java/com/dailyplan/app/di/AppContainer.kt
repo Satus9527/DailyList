@@ -61,6 +61,8 @@ class AppContainer(context: Context) {
     fun todayViewModel(): TodayViewModel =
         TodayViewModel(
             repository = taskRepository,
+            categoryRepository = categoryRepository,
+            tagRepository = tagRepository,
             reminderScheduler = reminderScheduler,
             asrController = asrController,
             asrSplitConfig = asrSplitConfig,

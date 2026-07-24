@@ -11,6 +11,7 @@ import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Update
 import com.dailyplan.app.data.local.TaskEntity
+import com.dailyplan.app.data.local.TaskTagCrossRef
 import java.util.Date
 
 @Dao
@@ -86,6 +87,66 @@ interface TaskDao {
         ORDER BY is_done ASC, sort_order ASC
     """)
     suspend fun tasksByDisplayDay(day: String): List<TaskEntity>
+
+    // MARK: - M5 F4 筛选（规格 §3.3）
+
+    /**
+     * 组合筛选基础查询：按展示日 + 分类 + 优先级。
+     * - 分类：传 null = 不限；传「其他」预设 id（:otherId）时额外包含 category_id IS NULL 的任务（§6）。
+     * - 优先级：传 null = 不限。
+     * 标签 AND 语义与 untaggedOnly 由 Repository 层用 TaskTagCrossRef 内存判定（见 LocalTaskRepository）。
+     */
+    @Query("""
+        SELECT * FROM task
+        WHERE date = :day
+          AND (:cat IS NULL OR category_id = :cat
+               OR (:cat = :otherId AND category_id IS NULL))
+          AND (:prio IS NULL OR priority = :prio)
+        ORDER BY is_done ASC, sort_order ASC
+    """)
+    suspend fun tasksByDateCategoryPriority(
+        day: String,
+        cat: String?,
+        otherId: String,
+        prio: String?
+    ): List<TaskEntity>
+
+    /** 全部 Task↔Tag 关联行（规格 §2.4，供内存映射 taskId → tagIds 集合） */
+    @Query("SELECT task_id, tag_id FROM task_tag")
+    suspend fun allCrossRefs(): List<TaskTagCrossRef>
+
+    /** 读取某任务标签（JOIN task_tag，规格 §3.3） */
+    @Query("""
+        SELECT tg.* FROM tag tg
+        JOIN task_tag tt ON tt.tag_id = tg.id
+        WHERE tt.task_id = :taskId
+        ORDER BY tg.name ASC
+    """)
+    suspend fun tagsForTask(taskId: String): List<com.dailyplan.app.data.local.TagEntity>
+
+    /** 标签联想补全：name 已归一（小写/半角），前缀须先归一（规格 §3.3） */
+    @Query("""
+        SELECT * FROM tag
+        WHERE name LIKE :normalizedPrefix || '%'
+        ORDER BY name ASC
+        LIMIT :limit
+    """)
+    suspend fun suggestTags(normalizedPrefix: String, limit: Int): List<com.dailyplan.app.data.local.TagEntity>
+
+    // —— M5 setTags：@Transaction 内先删旧关联，再批量插入（规格 §3.3）——
+    @Transaction
+    suspend fun setTags(taskId: String, tagIds: List<String>) {
+        deleteCrossRefs(taskId)
+        if (tagIds.isNotEmpty()) {
+            insertCrossRefs(tagIds.map { TaskTagCrossRef(taskId, it) })
+        }
+    }
+
+    @Query("DELETE FROM task_tag WHERE task_id = :taskId")
+    suspend fun deleteCrossRefs(taskId: String)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCrossRefs(crossRefs: List<TaskTagCrossRef>)
 }
 
 /** 重排参数载体（id + 新 sortOrder） */

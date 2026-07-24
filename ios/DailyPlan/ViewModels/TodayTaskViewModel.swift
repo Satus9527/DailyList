@@ -16,6 +16,15 @@ final class TodayTaskViewModel: ObservableObject {
     @Published var inputText: String = ""
     @Published var errorMessage: String?
 
+    // —— M5 F4 筛选（§3.1 / §4.2）：首页筛选栏状态，与各区块叠加生效，空条件=全部 ——
+    @Published var filter: TaskFilter = .init()
+    /// 全部分类（筛选栏 + 编辑页用）
+    @Published var categories: [CategoryDTO] = []
+    /// 全部标签（筛选栏标签多选用）
+    @Published var allTags: [TagDTO] = []
+    /// 任务 id → 标签 id 集合（按标签筛选的内存路径映射，§3.4，由 reload 刷新）
+    private var taskTagIds: [UUID: Set<UUID>] = [:]
+
     // —— F2 语音（M3）发布状态 ——
     @Published var isVoiceActive = false       // 语音听写进行中
     @Published var voiceAvailable = false       // 语音按钮是否可用（授权/能力判断）
@@ -42,6 +51,10 @@ final class TodayTaskViewModel: ObservableObject {
     private let repository: TaskRepository
     private let context: NSManagedObjectContext
 
+    // —— M5 F4：分类/标签读取（筛选栏与编辑页共用）——
+    private let categoryRepo: CategoryRepository
+    private let tagRepo: TagRepository
+
     /// 通知调度器（F3，M2）：完成即取消、取消完成恢复、设/改提醒排程均经此。
     private let scheduler: ReminderScheduler
 
@@ -59,6 +72,8 @@ final class TodayTaskViewModel: ObservableObject {
     init(context: NSManagedObjectContext, scheduler: ReminderScheduler, config: ASRSplitConfig) {
         self.context = context
         self.repository = LocalTaskRepository(context: context)
+        self.categoryRepo = LocalCategoryRepository(context: context)
+        self.tagRepo = LocalTagRepository(context: context)
         self.scheduler = scheduler
         // 配置缺失时降级为「语音不可用」，但绝不硬编码拆分常量（P0-4 精神）
         let effectiveConfig = config
@@ -88,8 +103,47 @@ final class TodayTaskViewModel: ObservableObject {
         } catch {
             errorMessage = "加载待办失败：\(error.localizedDescription)"
         }
+        loadCategories()
+        loadAllTags()
+        loadTaskTagIds()   // 刷新「任务→标签」映射，供按标签筛选（§3.4）
         refreshPermissions()   // 每次加载顺带刷新权限状态（D4 横幅）
     }
+
+    // MARK: - M5 F4 筛选支持
+
+    private func loadCategories() {
+        do { categories = try categoryRepo.all() }
+        catch { categories = [] }
+    }
+
+    private func loadAllTags() {
+        do { allTags = try tagRepo.all() }
+        catch { allTags = [] }
+    }
+
+    /// 刷新「任务 id → 标签 id 集合」映射（内存过滤路径，规格 §3.4）。
+    private func loadTaskTagIds() {
+        var map: [UUID: Set<UUID>] = [:]
+        for t in tasks {
+            if let tg = try? repository.tags(forTaskId: t.id) {
+                map[t.id] = Set(tg.map { $0.id })
+            } else {
+                map[t.id] = []
+            }
+        }
+        taskTagIds = map
+    }
+
+    /// 对给定列表套用当前筛选（空条件=原样返回，§6）。
+    func filteredTasks(from list: [TaskDTO]) -> [TaskDTO] {
+        guard !filter.isEmpty else { return list }
+        return list.filter { filter.matches($0, tagIds: taskTagIds[$0.id] ?? []) }
+    }
+
+    /// 三区块筛选视图（筛选栏与各区块统一生效，§4.3）
+    var filteredMissedTasks: [TaskDTO] { filteredTasks(from: missedTasks) }
+    var filteredInProgressTasks: [TaskDTO] { filteredTasks(from: inProgressTasks) }
+    var filteredDoneTasks: [TaskDTO] { filteredTasks(from: doneTasks) }
 
     // MARK: - M4 D3 分区（首页三区块，均由 tasks 派生）
     /// 错过的提醒（应响未响）：未完成 + remindAt 已过当前时刻（displayDay==今日由 tasks 保证）。
@@ -230,6 +284,9 @@ final class TodayTaskViewModel: ObservableObject {
     /// - 编辑 remindAt 时由 `scheduler.schedule` 内部先 `cancel` 再登记（幂等，改期不重复，AC-28 / R-E11）。
     /// - remindAt=nil（关闭提醒）或时间已过期 → `scheduler.cancel` 移除该任务全部 pending。
     func saveReminder(taskId: UUID, remindAt: Date?, leadMinutes: Int, repeatCount: Int) {
+        // 先刷新：确保读到 F4 编辑页刚落库的最新 categoryId/priority（由 editVM.save 经同一 context 写入），
+        // 避免用旧内存副本整体 update 时把组织字段覆盖回旧值。
+        reload()
         guard let idx = tasks.firstIndex(where: { $0.id == taskId }) else { return }
         var task = tasks[idx]
         task.remindAt = remindAt

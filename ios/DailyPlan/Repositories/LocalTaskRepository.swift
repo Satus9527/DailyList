@@ -140,6 +140,99 @@ struct LocalTaskRepository: TaskRepository {
             if context.hasChanges { try context.save() }   // 单事务提交整组重排
         }
     }
+
+    // MARK: - M5 F4 筛选 / 标签读写（规格 §3.2 / §3.3）
+
+    func filteredTasks(on date: String, filter: TaskFilter) throws -> [TaskDTO] {
+    try context.performAndWait {
+        let req = Task.fetchRequest()
+        // 基础谓词：展示日（默认当日），与 M4 §3 口径一致（date == day）
+        var sub = [NSPredicate(format: "date == %@", date)]
+        if let cat = filter.categoryId {
+            // 筛「其他」含 nil（§6）：未归类在逻辑上等同「其他」
+            if cat == CategorySeed.otherId {
+                sub.append(NSPredicate(format: "categoryId == %@ OR categoryId == nil", cat as NSUUID))
+            } else {
+                sub.append(NSPredicate(format: "categoryId == %@", cat as NSUUID))
+            }
+        }
+        if let p = filter.priority {
+            sub.append(NSPredicate(format: "priority == %@", p.rawValue))
+        }
+        if filter.untaggedOnly {
+            // 仅无标签任务：tags 关系为空
+            sub.append(NSPredicate(format: "tags.@count == 0"))
+        } else if !filter.tagIds.isEmpty {
+            // AND：任务须包含全部指定 tag id（SUBQUERY 计数 == 指定数量）
+            sub.append(NSPredicate(
+                format: "SUBQUERY(tags, $t, $t.id IN %@).@count == %d",
+                filter.tagIds.map { $0 as NSUUID }, filter.tagIds.count))
+        }
+        req.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: sub)
+        req.sortDescriptors = [
+            NSSortDescriptor(key: "isDone", ascending: true),
+            NSSortDescriptor(key: "sortOrder", ascending: true)
+        ]
+        let results = try context.fetch(req)
+        return results.map { ($0 as! Task).toDTO() }
+    }
+}
+
+func tasksByCategory(_ categoryId: UUID, on date: String) throws -> [TaskDTO] {
+    try filteredTasks(on: date, filter: TaskFilter(categoryId: categoryId))
+}
+
+func tasksByPriority(_ priority: Priority, on date: String) throws -> [TaskDTO] {
+    try filteredTasks(on: date, filter: TaskFilter(priority: priority))
+}
+
+func tasksByTags(_ tagIds: Set<UUID>, on date: String) throws -> [TaskDTO] {
+    try filteredTasks(on: date, filter: TaskFilter(tagIds: tagIds))
+}
+
+func suggestTags(prefix: String, limit: Int) throws -> [TagDTO] {
+    let norm = TagNormalizer.normalize(prefix)   // 先归一再查（§5）
+    guard !norm.isEmpty else { return [] }
+    return try context.performAndWait {
+        let req = Tag.fetchRequest()
+        req.predicate = NSPredicate(format: "name BEGINSWITH %@", norm)
+        req.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
+        req.fetchLimit = max(0, limit)
+        let results = try context.fetch(req) as? [Tag] ?? []
+        return results.map { $0.toDTO() }
+    }
+}
+
+func tags(forTaskId id: UUID) throws -> [TagDTO] {
+    try context.performAndWait {
+        let req = Task.fetchRequest()
+        req.predicate = NSPredicate(format: "id == %@", id as NSUUID)
+        req.fetchLimit = 1
+        guard let task = try context.fetch(req).first as? Task else { return [] }
+        // tags 为 To-Many 关系（Cascade 删 Task 时级联清理关联行，规格 §6.3）
+        return task.tags.map { $0.toDTO() }.sorted { $0.name < $1.name }
+    }
+}
+
+func setTags(taskId: UUID, tagIds: Set<UUID>) throws {
+    try context.performAndWait {
+        let req = Task.fetchRequest()
+        req.predicate = NSPredicate(format: "id == %@", taskId as NSUUID)
+        req.fetchLimit = 1
+        guard let task = try context.fetch(req).first as? Task else { return }
+        // 先清空旧关联（整体替换语义，§2.4）
+        task.tags = Set<Tag>()
+        if !tagIds.isEmpty {
+            let tagReq = Tag.fetchRequest()
+            tagReq.predicate = NSPredicate(format: "id IN %@", tagIds.map { $0 as NSUUID })
+            if let tags = try context.fetch(tagReq) as? [Tag] {
+                task.tags = Set(tags)
+            }
+        }
+        if context.hasChanges { try context.save() }
+    }
+}
+
 }
 
 // Task.fetchRequest() 便捷（NSManagedObject 默认提供，但显式声明便于类型推断）

@@ -11,6 +11,14 @@ enum class Priority(val raw: String) {
     }
 }
 
+/** 优先级展示名（编辑页/筛选栏用，规格 §4.1） */
+val Priority.displayName: String
+    get() = when (this) {
+        Priority.HIGH -> "高"
+        Priority.MEDIUM -> "中"
+        Priority.LOW -> "低"
+    }
+
 /** 待办来源：语音 / 文字 / 模板 / 补生成 */
 enum class TaskSource(val raw: String) {
     VOICE("voice"), TEXT("text"), TEMPLATE("template"), MAKEUP("makeup")

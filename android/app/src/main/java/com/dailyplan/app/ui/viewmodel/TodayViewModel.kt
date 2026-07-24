@@ -7,13 +7,20 @@ package com.dailyplan.app.ui.viewmodel
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.dailyplan.app.data.local.CategoryEntity
+import com.dailyplan.app.data.local.TagEntity
+import com.dailyplan.app.data.repository.CategoryRepository
+import com.dailyplan.app.data.repository.TagRepository
 import com.dailyplan.app.data.repository.TaskRepository
 import com.dailyplan.app.data.reminder.NotificationStatusHelper
 import com.dailyplan.app.data.reminder.ReminderScheduler
 import com.dailyplan.app.data.voice.ASRController
 import com.dailyplan.app.data.voice.DegradeReason
 import com.dailyplan.app.data.voice.VoiceState
+import com.dailyplan.app.domain.model.Priority
 import com.dailyplan.app.domain.model.Task
+import com.dailyplan.app.domain.model.TaskFilter
+import com.dailyplan.app.domain.model.matches
 import com.dailyplan.app.domain.model.TaskSource
 import com.dailyplan.app.domain.model.todayDateString
 import com.dailyplan.app.domain.voice.TaskMergeSplitUseCase
@@ -22,6 +29,7 @@ import com.dailyplan.app.util.ASRSplitConfig
 import com.dailyplan.app.util.SettingsPrefs
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.Date
+import java.util.UUID
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -40,6 +48,8 @@ data class NotificationBannerInfo(
 
 class TodayViewModel(
     private val repository: TaskRepository,
+    private val categoryRepository: CategoryRepository,
+    private val tagRepository: TagRepository,
     private val reminderScheduler: ReminderScheduler,
     private val asrController: ASRController,
     asrSplitConfig: ASRSplitConfig?,
@@ -66,6 +76,21 @@ class TodayViewModel(
     // M4 平铺展示顺序（错过的提醒 → 进行中 → 已完成），供合并「上一条」与拖拽重排定位
     private val _flatOrder = MutableStateFlow<List<Task>>(emptyList())
 
+    // M5 F4 筛选（规格 §3.1 / §3.4）：内存过滤作用于已加载的展示日集合
+    private val _filter = MutableStateFlow(TaskFilter())
+    val filter: StateFlow<TaskFilter> = _filter.asStateFlow()
+
+    // M5 分类列表（编辑页选择器 + 首页筛选栏用）
+    private val _categories = MutableStateFlow<List<CategoryEntity>>(emptyList())
+    val categories: StateFlow<List<CategoryEntity>> = _categories.asStateFlow()
+
+    // M5 全部标签（首页筛选栏标签下拉用）
+    private val _allTags = MutableStateFlow<List<TagEntity>>(emptyList())
+    val allTags: StateFlow<List<TagEntity>> = _allTags.asStateFlow()
+
+    // M5 taskId → 标签 id 集合 映射（内存筛选用，规格 §3.4）
+    private val _taskTagIds = MutableStateFlow<Map<UUID, Set<UUID>>>(emptyMap())
+
     // 输入框文本
     private val _inputText = MutableStateFlow("")
     val inputText: StateFlow<String> = _inputText.asStateFlow()
@@ -89,12 +114,14 @@ class TodayViewModel(
     private val _voiceInputEnabled = MutableStateFlow(settingsPrefs.voiceInputEnabled)
     val voiceInputEnabled: StateFlow<Boolean> = _voiceInputEnabled.asStateFlow()
 
-    /** 进度 X / Y（规格 R-U3 / AC-15）：X=已完成数，Y=当日总数 */
-    val doneCount: Int get() = _doneTasks.value.size
-    val totalCount: Int get() = _missedTasks.value.size + _inProgressTasks.value.size + _doneTasks.value.size
+    /** 进度 X / Y（规格 R-U3 / AC-15）：X=已完成数，Y=当日总数（不受筛选影响，反映当日整体完成度） */
+    val doneCount: Int get() = _tasks.value.count { it.isDone }
+    val totalCount: Int get() = _tasks.value.size
 
     init {
         reload()
+        loadCategories()
+        loadAllTags()
         // 降级回调：关语音按钮 + 引导文字（规格 §6）；Toast 由 UI 观察 voiceState 展示
         asrController.onDegrade = { reason -> onVoiceDegraded(reason) }
     }
@@ -102,19 +129,37 @@ class TodayViewModel(
     // MARK: - F6 加载（按展示日取数；S5 重归类为展示层，不改 date）
     fun reload() {
         viewModelScope.launch {
-            runCatching { repository.tasksByDisplayDay(todayDateString()) }
-                .onSuccess { all ->
-                    _tasks.value = all
-                    val now = Date()
-                    // D3 错过区：应响未响（remindAt < now 且未完成且 displayDay==今日）
-                    _missedTasks.value = all.filter { !it.isDone && it.remindAt != null && it.remindAt < now }
-                        .sortedBy { it.remindAt }
-                    _inProgressTasks.value = all.filter { !it.isDone && !(it.remindAt != null && it.remindAt < now) }
-                    _doneTasks.value = all.filter { it.isDone }
-                    _flatOrder.value = _missedTasks.value + _inProgressTasks.value + _doneTasks.value
-                }
+            runCatching {
+                val all = repository.tasksByDisplayDay(todayDateString())
+                val map = repository.taskTagIds()
+                _tasks.value = all
+                _taskTagIds.value = map
+            }.onSuccess { recomputeSections() }
                 .onFailure { _errorMessage.value = "加载待办失败：${it.message}" }
         }
+    }
+
+    /**
+     * M5 重算三区块（错过的提醒 / 进行中 / 已完成），对每个区块统一叠加当前筛选条件（§4.3）。
+     * 区块内排序口径沿用 M4；筛选对各区块一致生效。内存过滤，零额外查询。
+     */
+    private fun recomputeSections() {
+        val all = _tasks.value
+        val f = _filter.value
+        val now = Date()
+        val visible = all.filter { f.matches(it, _taskTagIds.value[it.id] ?: emptySet()) }
+        // D3 错过区：应响未响（remindAt < now 且未完成）
+        _missedTasks.value = visible.filter { !it.isDone && it.remindAt != null && it.remindAt < now }
+            .sortedBy { it.remindAt }
+        _inProgressTasks.value = visible.filter { !it.isDone && !(it.remindAt != null && it.remindAt < now) }
+        _doneTasks.value = visible.filter { it.isDone }
+        _flatOrder.value = _missedTasks.value + _inProgressTasks.value + _doneTasks.value
+    }
+
+    /** M5 应用筛选（单维/组合）；仅重算展示，不触库（规格 §3.4 推荐路径） */
+    fun applyFilter(filter: TaskFilter) {
+        _filter.value = filter
+        recomputeSections()
     }
 
     fun onInputChanged(text: String) { _inputText.value = text }
@@ -275,28 +320,72 @@ class TodayViewModel(
 
     fun clearError() { _errorMessage.value = null }
 
-    // MARK: - F3 提醒设置（UI 调用，M2-D，Task #36）
+    // MARK: - M5 F4 任务组织能力写方法（编辑页统一保存分类/优先级/标签 + 复用 M4 提醒）
+
+    /** 加载分类列表（预设 + 自建），供编辑页选择器与首页筛选栏 */
+    fun loadCategories() {
+        viewModelScope.launch {
+            runCatching { categoryRepository.all() }.onSuccess { _categories.value = it }
+        }
+    }
+
+    /** 新建自建分类（isPreset=false），成功后刷新列表（规格 §4.1 / AC-13） */
+    suspend fun addCategory(name: String): CategoryEntity? =
+        runCatching { categoryRepository.add(name) }
+            .onSuccess { loadCategories() }
+            .getOrNull()
+
+    /** 加载全部标签（首页筛选栏标签下拉用） */
+    fun loadAllTags() {
+        viewModelScope.launch {
+            runCatching { tagRepository.all() }.onSuccess { _allTags.value = it }
+        }
+    }
+
+    /** 标签联想补全（先归一前缀，规格 §3.3 / §5.1） */
+    suspend fun suggestTags(prefix: String, limit: Int): List<TagEntity> =
+        runCatching { tagRepository.suggestTags(prefix, limit) }.getOrDefault(emptyList())
+
+    /** 读取某任务标签（编辑页回显 chips，规格 §2.4） */
+    suspend fun tagsForTask(id: UUID): List<TagEntity> =
+        runCatching { repository.tagsForTask(id) }.getOrDefault(emptyList())
+
+    /** 输入标签经归一后写入/复用，返回 TagEntity（规格 §2.4 / §5.1，复用 TagRepository 去重） */
+    suspend fun addTagFromInput(raw: String): TagEntity? =
+        runCatching { tagRepository.addOrReuse(raw) }.getOrNull()
+
     /**
-     * 为单条待办设置/修改提醒：先更新领域模型（remindAt / leadMinutes / repeatCount），
-     * 再 repository.update 持久化；随后据新值排程。
-     * - 编辑 remindAt 时由 reminderScheduler.schedule 内部先 cancel 再登记（幂等，改期不重复，AC-28 / R-E11）。
-     * - remindAt=null（关闭提醒）→ reminderScheduler.cancel 移除该任务全部 pending。
+     * 保存单条待办的组织属性 + 提醒（编辑页统一入口，规格 §4.1）：
+     * - 刷新读取最新任务避免丢失更新，整体 update（category/priority/remindAt/lead/repeat）；
+     * - setTags 整体替换标签关联（tagIds 为归一后的 Tag.id，由 UI 经 TagRepository.addOrReuse 得到）；
+     * - 据 remindAt 重新排程。
      */
-    fun saveReminder(taskId: UUID, remindAt: Date?, leadMinutes: Int, repeatCount: Int) {
+    fun saveTaskAll(
+        taskId: UUID,
+        categoryId: UUID?,
+        priority: Priority,
+        tags: List<UUID>,
+        remindAt: Date?,
+        leadMinutes: Int,
+        repeatCount: Int
+    ) {
         viewModelScope.launch {
             runCatching {
-                val current = _tasks.value.firstOrNull { it.id == taskId } ?: return@runCatching
+                val current = repository.get(taskId) ?: return@runCatching
                 val updated = current.copy(
+                    categoryId = categoryId,
+                    priority = priority,
                     remindAt = remindAt,
                     leadMinutes = leadMinutes,
                     repeatCount = repeatCount,
                     updatedAt = Date()
                 )
                 repository.update(updated)
+                repository.setTags(taskId, tags.toSet())
                 if (remindAt != null) reminderScheduler.schedule(updated)
                 else reminderScheduler.cancel(taskId)
             }.onSuccess { reload() }
-                .onFailure { _errorMessage.value = "保存提醒失败：${it.message}" }
+                .onFailure { _errorMessage.value = "保存失败：${it.message}" }
         }
     }
 

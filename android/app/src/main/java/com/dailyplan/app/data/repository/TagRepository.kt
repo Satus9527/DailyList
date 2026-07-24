@@ -5,6 +5,7 @@ package com.dailyplan.app.data.repository
 
 import com.dailyplan.app.data.local.AppDatabase
 import com.dailyplan.app.data.local.TagEntity
+import com.dailyplan.app.util.TagNormalizer
 import java.util.UUID
 
 interface TagRepository {
@@ -24,19 +25,4 @@ class LocalTagRepository(private val db: AppDatabase) : TagRepository {
         dao.insert(entity)
         return entity
     }
-}
-
-/** 标签归一：忽略大小写、首尾空格、全角转半角（规格 §4.1 / AC-30） */
-object TagNormalizer {
-    fun normalize(raw: String): String {
-        val trimmed = raw.trim()
-        // 全角转半角
-        val halfWidth = trimmed.fullWidthToHalfWidth()
-        return halfWidth.lowercase()
-    }
-
-    private fun String.fullWidthToHalfWidth(): String =
-        map { c ->
-            if (c.code in 0xFF01..0xFF5E) (c.code - 0xFEE0).toChar() else c
-        }.joinToString("")
 }

@@ -116,12 +116,17 @@ struct TodayView: View {
                     .onTapGesture { vm.openAppSettings() }   // 深链系统设置（规格 §2.3）
                 }
 
+                // —— M5 F4 筛选栏（规格 §4.3：D4 横幅之下、列表之上）——
+                FilterBar(filter: $vm.filter, categories: vm.categories, allTags: vm.allTags)
+                    .padding(.horizontal)
+
                 // 当日列表（M4 S5：错过的提醒 / 进行中 / 已完成 三个区块；进行中可拖拽，AC-16）
+                // M5 F4：三区块统一叠加当前筛选（vm.filter，空条件=全部，§6 / AC-30④）
                 List {
                     // —— M4 D3 错过的提醒区（AC-10）——
-                    if !vm.missedTasks.isEmpty {
+                    if !vm.filteredMissedTasks.isEmpty {
                         Section {
-                            ForEach(vm.missedTasks) { task in
+                            ForEach(vm.filteredMissedTasks) { task in
                                 TaskRowView(
                                     task: task,
                                     isEditing: $editingId,
@@ -137,7 +142,7 @@ struct TodayView: View {
                             HStack {
                                 Text("错过的提醒")
                                 Spacer()
-                                Text("\(vm.missedTasks.count)")
+                                Text("\(vm.filteredMissedTasks.count)")
                                     .foregroundColor(.secondary)
                             }
                         }
@@ -145,7 +150,7 @@ struct TodayView: View {
 
                     // —— 进行中（含跨 0 点归触发日的任务）——
                     Section {
-                        ForEach(vm.inProgressTasks) { task in
+                        ForEach(vm.filteredInProgressTasks) { task in
                             TaskRowView(
                                 task: task,
                                 isEditing: $editingId,
@@ -164,9 +169,9 @@ struct TodayView: View {
                     } header: { Text("进行中") }
 
                     // —— 已完成（置底）——
-                    if !vm.doneTasks.isEmpty {
+                    if !vm.filteredDoneTasks.isEmpty {
                         Section {
-                            ForEach(vm.doneTasks) { task in
+                            ForEach(vm.filteredDoneTasks) { task in
                                 TaskRowView(
                                     task: task,
                                     isEditing: $editingId,

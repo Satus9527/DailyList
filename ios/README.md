@@ -13,18 +13,20 @@ ios/DailyPlan/
   Models/
     Enums.swift                   # Priority / TaskSource / SyncState（String rawValue 落库）
     TaskDTO.swift                 # 纯领域模型（与 Core Data 解耦），含 makeNew 便捷构造
+    TaskFilter.swift              # M5 F4 筛选条件值类型（categoryId/priority/tagIds/untaggedOnly + 内存 matches）
     CoreData/
       Task+CoreData.swift         # Task NSManagedObject 子类 + toDTO 映射
       Category+CoreData.swift     # Category 子类 + CategoryDTO
       Tag+CoreData.swift          # Tag 子类 + TagDTO
       TaskTag+CoreData.swift      # Task↔Tag 关联实体
   Repositories/
-    TaskRepository.swift          # Repository 协议（7 方法签名，规格 §5.1）
-    LocalTaskRepository.swift     # Core Data 实现（7 方法语义 + 单事务提交）
+    TaskRepository.swift          # Repository 协议（M1 8 方法 + M5 7 筛选/标签读写方法）
+    LocalTaskRepository.swift     # Core Data 实现（含 M5 筛选谓词 / 标签读写 + 单事务提交）
     CategoryRepository.swift      # 基础 CRUD（预设不可删，删自建回退「其他」）
-    TagRepository.swift           # 基础 CRUD（写入前归一，AC-30）
+    TagRepository.swift           # 基础 CRUD（写入前归一，AC-30）+ TagNormalizer
   ViewModels/
-    TodayTaskViewModel.swift      # F1/F5/F6 聚合，X/Y 进度；M3 新增语音开关/降级/手动落一条
+    TodayTaskViewModel.swift      # F1/F5/F6 聚合，X/Y 进度；M3 语音；M5 筛选状态/映射
+    TaskEditViewModel.swift       # M5 F4 编辑协调：分类加载/自建、标签联想/确认/去重、保存
   Speech/
     ASRController.swift           # ASRController 协议 + PermissionState + NativeASRController（SFSpeechRecognizer+AVAudioEngine）
     SilentPauseMonitor.swift      # 长停顿监测（阈值取自配置，禁止硬编码）
@@ -32,8 +34,10 @@ ios/DailyPlan/
     VoiceTaskSplitter.swift       # 领域层自动拆分，消费 asr_split_config.json（P0-4）
     TaskMergeSplitUseCase.swift   # 合并/拆分基础版（§7，冻结接口，复用 Repository）
   Views/
-    TodayView.swift               # 首页「今日」：进度 / 列表 / 输入框
+    TodayView.swift               # 首页「今日」：进度 / 筛选栏 / 列表 / 输入框
     TaskRowView.swift             # 单条：勾选完成 / 行内编辑 / 删除
+    ReminderSettingView.swift     # F3 提醒 + M5 F4 分类/优先级/标签（同 sheet 共存）
+    FilterBar.swift               # M5 F4 首页筛选栏（单维 + 组合 AND，清除=全部）
   Resources/
     CategorySeed.swift            # 预设分类固定 UUID（规格 §3.2）
     ASRSplitConfig.swift          # 解析 shared/asr_split_config.json（规格 §8，F2 才消费）
@@ -210,6 +214,40 @@ ios/DailyPlan/
 - **DND/Focus 检测**：iOS 无可靠公开 API 检测勿扰（规格 §2.1），仅以「通知权限 + 横幅引导」兜底，未做 Focus 拦截提示。
 - **埋点上报**（`missed_reminder_shown`/`notification_banner_shown`/`settings_open`/`todo_merge`/`todo_split`）：按规格仅留调用点语义，未接通上报逻辑。
 - **真机验证**：DND 拦截、跨日触发、合并/拆分手感需真机验证（同 M1/M2/M3 验收跟进项）；本沙箱无 Xcode，未编译。
+
+## M5（F4 组织能力）iOS 完成项与未做项
+
+> 阶段：Milestone M5（F4 分类 / 优先级 / 标签）。依据 `设计规格_M5组织能力.md`（AC-12/13/30、R-O1/R-O2）。
+> 范围：**仅扩展筛选方法、标签读写与 UI 交互层**，数据层零返工；复用 M1 已落地的 `Category`/`Tag`/`TaskTagCrossRef`、
+> `Task.categoryId`/`priority`，未重定义任何字段/实体（§0 / §6）。
+
+### 已实现（M5 · iOS）
+
+- **Repository 筛选方法（§3.2 / §3.3）**：`TaskRepository` 协议与 `LocalTaskRepository` 新增
+  `filteredTasks(on:filter:)`（组合 AND）、`tasksByCategory(_:on:)` / `tasksByPriority(_:on:)` / `tasksByTags(_:on:)`（单维便捷）、
+  `suggestTags(prefix:limit:)`（联想补全，先归一再 `BEGINSWITH` 查）、`tags(forTaskId:)`、`setTags(taskId:tagIds:)`（整体替换关联）。
+  谓词含「筛其他含 nil」与「标签 AND（SUBQUERY 计数 == 数量）」「仅无标签（tags.@count == 0）」。
+
+- **标签归一与去重（§5 / AC-30③ / R-O1）**：**复用 M1 既有 `TagNormalizer.normalize`**（忽略大小写 + 去首尾空格 + 全角半角），
+  写入经 `TagRepository.addOrReuse(normalizedName:)` 命中同一 `Tag` 行天然去重；`setTags` 收集归一后的 `Tag.id` 集合整体替换关联。
+
+- **F4 编辑页（§4.1，与 M2 提醒同 sheet 共存，不另起新页）**：`ReminderSettingView` 扩展「分类 / 优先级 / 标签」三段：
+  - 分类：4 预设 + 自建入口（`CategoryRepository.add`，预设不可改名/删）；默认当前值或「其他」预设 id。
+  - 优先级：高/中/低 分段选择器，默认「中」，列表行不强制展示标识。
+  - 标签：实时 `suggestTags` 联想补全（下拉候选点击即填）、回车或逗号（中/英）确认、归一去重、可删 chip；保存经 `addOrReuse` + `setTags`。
+  - 保存：编辑页 `TaskEditViewModel.save` 写 category/priority + `setTags`；提醒字段经 `TodayTaskViewModel.saveReminder`（已改为先 reload 再整体 update，避免覆盖刚落库的组织字段）。
+
+- **首页筛选栏（§4.2 / §4.3）**：新增 `Views/FilterBar.swift`，置于 M4 D4 横幅之下、列表之上；分类/优先级/标签单维与组合（AND）筛选，
+  「清除筛选」恢复全部（空条件 = 全部）。筛选对各区块（错过的提醒/进行中/已完成）统一生效（ViewModel 内存路径 `filtered*` 派生，
+  复用 M4 已加载展示日集合，零额外查询，与 D3/D4/S5 共存不冲突）。
+
+- **DI**：沿用既有约定（`TodayTaskViewModel` / `ReminderSettingView` 内直接构造 `LocalXRepository(context:)` 共享同一 `viewContext`），
+  未引入新的 AppContainer；`TaskEditViewModel` 自带 `categoryRepo`/`tagRepo`/`taskRepo`。
+
+### 刻意未做 / 待确认（M5 · iOS）
+- **DB 路径 `filteredTasks` 与跨 0 点**：DB 路径以 `date == day` 为主，不含跨 0 点项；首页实际走内存过滤路径（对 M4 已加载展示日集合套用 `TaskFilter.matches`），结果与规格一致。如需 DB 路径严格含跨日项，可后续参照 M4 `tasksForDisplayDay` 口径扩展。
+- **标签 UI 精确搜索/批量管理**：当前为编辑页内联 chip + 联想；无独立标签管理页（v1 未要求）。
+- **真机验证**：分类/优先级/标签归一一致性与筛选 AND 语义需真机验证（同 M1–M4 验收跟进项）；本沙箱无 Xcode，未编译。
 
 ## 与规格的偏差 / 待确认点
 - **Core Data 多对多建模**：iOS 采用原生 many-to-many 关系（`Task.tags`），Android Room 用显式 `task_tag` 关联表；
